@@ -36,8 +36,6 @@ from airflow.providers.gun.sync.pg_to_ch_common import (
     ClickhouseManipulator,
 )
 
-from pandas.core.algorithms import isin
-
 
 class PostgresToClickhouseSchemaStrategy(Enum):
     create_table_if_not_exists = "create_table_if_not_exists"

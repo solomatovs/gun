@@ -302,8 +302,8 @@ class PostgresToClickhouseFullReload:
         self.log.info(
             f"Full reload {src_schema}.{src_table} -> {tgt_schema}.{tgt_table}"
         )
-        self.log.info(f"pg: {src_cursor.connection.dsn}")
-        self.log.info(f"ch: {tgt_cursor._client.connection}")
+        self.log.info(f"pg src: {src_cursor.connection.dsn}")
+        self.log.info(f"ch tgt: {tgt_cursor._client.connection}")
 
         union_columns = self.make_fields_info(
             src_cursor,

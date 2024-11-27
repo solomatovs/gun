@@ -4,7 +4,7 @@ def get_provider_info():
         "name": "gun",
         "description": "gun",
         "suspended": False,
-        "versions": ["0.6.4"],
+        "versions": ["0.7.0"],
         "dependencies": [
             "kerberos>=1.3.1",
             "psycopg2>=2.9",

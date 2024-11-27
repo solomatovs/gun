@@ -765,7 +765,7 @@ alter table {pg_schema_back}.{pg_table} rename to {pg_table_back};"""
         cursor.execute(stmp)
 
 
-    def pg_insert_select(
+    def pg_insert_select_in_one_postgres(
         self,
         cursor: psycopg2.extensions.cursor,
         insert_schema: str,
@@ -774,7 +774,6 @@ alter table {pg_schema_back}.{pg_table} rename to {pg_table_back};"""
         select_schema: str,
         select_table: str,
         select_fields: Sequence[str],
-        select_params: Optional[List[Any]],
         select_alias: str,
     ):
         _insert_table = self._table_path_exp(
@@ -814,4 +813,61 @@ from
             }
         )
 
-        cursor.execute(stmp, select_params)
+        return stmp
+
+
+    def pg_insert_select_between_two_postgres(
+        self,
+        insert_cursor: psycopg2.extensions.cursor,
+        insert_schema: str,
+        insert_table: str,
+        insert_fields: Sequence[str],
+        select_cursor: psycopg2.extensions.cursor,
+        select_schema: str,
+        select_table: str,
+        select_fields: Sequence[str],
+        select_alias: str,
+    ):
+        _insert_table = self._table_path_exp(
+            insert_cursor,
+            insert_schema,
+            insert_table,
+        )
+        _select_table = self._table_path_exp(
+            select_cursor,
+            select_schema,
+            select_table,
+        )
+        _insert_fields = ",\n".join(insert_fields)
+        _select_fields = ",\n".join(select_fields)
+        _select_alias = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+            )
+            .as_string(select_cursor)
+        )
+
+        copy_to_stmp = """copy {insert_table} (
+{insert_fields}
+) from stdin""".format(
+            **{
+                "insert_table": _insert_table,
+                "insert_fields": _insert_fields,
+            }
+        )
+
+        copy_from_stmp = """copy (
+select
+{select_fields}
+from
+    {select_table} as {select_alias}
+) to stdout""".format(
+            **{
+                "select_table": _select_table,
+                "select_fields": _select_fields,
+                "select_alias": _select_alias,
+            }
+        )
+
+        return copy_from_stmp, copy_to_stmp

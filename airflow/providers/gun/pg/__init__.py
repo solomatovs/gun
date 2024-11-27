@@ -14,9 +14,9 @@ from typing import (
     Union,
     Dict,
 )
-
+from enum import Enum
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, ExitStack
 
 import psycopg2
 import psycopg2.extras
@@ -36,6 +36,7 @@ __all__ = [
     "pg_commit",
     "pg_module",
     "pg_copy_to_pg",
+    "pg_copy_to_pg_use_sql",
     "pg_copy_to_handle",
     "pg_copy_to_stdout",
     "pg_copy_to_file",
@@ -56,8 +57,6 @@ __all__ = [
     "pg_register_ipaddress",
     "pg_register_range",
     "pg_save_to_xcom",
-    "pg_res_execute_and_commit",
-    "pg_res_fetchall_to_xcom",
 ]
 
 pg_cur_key_default = "pg_cur"
@@ -141,12 +140,12 @@ class PrintSqlCursor(psycopg2.extensions.cursor):
             print(f"---- call error: {e}", file=sys.stderr)
             raise
 
-    def copy_expert(self, sql, file, **kwargs):
+    def copy_expert(self, sql, file, size, /):
         try:
             print(f"---- copy ----")
             print(self.connection.dsn)
             print(sql)
-            res = super().copy_expert(sql, file, **kwargs)
+            res = super().copy_expert(sql, file, size)
             print("---- copy success ----")
             return res
         except Exception as e:
@@ -1106,7 +1105,256 @@ def pg_copy_to_pg(
     return wrapper
 
 
-class PostgresCopyExpertModule(PipeTask):
+class CopyExpertPipeThread(threading.Thread):
+    def __init__(
+        self,
+        read_f,
+        cursor,
+        query: str,
+        params,
+        size: int = 8192,
+        group: None = None,
+        target: Callable[..., object] | None = None,
+        name: str | None = None,
+        args: Iterable[Any] = (),
+        kwargs: Mapping[str, Any] | None = None,
+        *,
+        daemon: bool | None = None,
+    ) -> None:
+        super().__init__(group, target, name, args, kwargs, daemon=daemon)
+        self.read_f = read_f
+        self.cursor: psycopg2.extensions.cursor = cursor
+        self.query = query
+        self.params = params
+        self.size = size
+
+    def copy_from_expert(self):
+        if self.params is not None:
+            self.query = self.cursor.mogrify(self.query, self.params)
+            self.query = self.query.decode("utf-8")
+        
+        self.cursor.copy_expert(self.query, self.read_f, self.size)
+
+    def run(self):
+        self.exc = None
+        try:
+            self.copy_from_expert()
+        except BaseException as e:
+            self.exc = e
+        finally:
+            self.read_f.close()
+
+    def join(self):
+        threading.Thread.join(self)
+
+        if self.exc:
+            raise self.exc
+
+class PostgresCopyExpertToPostgres:
+    def execute(
+        src_cursor: psycopg2.extensions.cursor,
+        src_query: str,
+        src_params,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_query: str,
+        tgt_params,
+        size: Optional[int] = None,
+    ):
+        if src_cursor is None:
+            raise RuntimeError(
+                f"""src postgres cursor was not passed"""
+            )
+
+        if tgt_cursor is None:
+            raise RuntimeError(
+                f"""tgt postgres cursor was not passed"""
+            )
+
+        if src_query is None or not isinstance(src_query, str):
+            raise RuntimeError(f"parameter 'src_query' incorrect type {type(src_query)}")
+        
+        if tgt_query is None or not isinstance(tgt_query, str):
+            raise RuntimeError(f"parameter 'tgt_template' incorrect type {type(tgt_query)}")
+
+        if size is None:
+            size = 8192
+
+        if not isinstance(size, int):
+            raise RuntimeError(f"parameter 'size' incorrect type {type(size)}")
+        
+        # print(f"src: {src_cursor.connection.dsn}")
+        # print(f"tgt: {tgt_cursor.connection.dsn}")
+
+        r_fd, w_fd = os.pipe()
+
+        with ExitStack() as stack:
+            read_f = stack.enter_context(os.fdopen(r_fd, "rb"))
+            write_f = stack.enter_context(os.fdopen(w_fd, "wb"))
+
+            # добавляю асинхронную задачу на копирование pipe -> tgt_schema.tgt_table
+            copy_from_pipe = CopyExpertPipeThread(
+                read_f,
+                tgt_cursor,
+                tgt_query,
+                tgt_params,
+                size,
+                name=f"pipe >> {tgt_cursor.connection.dsn}",
+            )
+            # добавляю асинхронную задачу на копирование src_schema.src_table -> pipe
+            copy_to_pipe = CopyExpertPipeThread(
+                write_f,
+                src_cursor,
+                src_query,
+                src_params,
+                size,
+                name=f"{src_cursor.connection.dsn} >> pipe",
+            )
+
+            # стартую задачи в асинхронном режиме
+            copy_from_pipe.start()
+            copy_to_pipe.start()
+
+            # сначала ожидаю выполнения copy_to и соответственно закрытия read_f и только в такой последовательности (не меняй последовательность)
+            # copy_to копирует данные в pipe, и когда copy_to завершится, то будет автоматически закрыт write_f сторона pipe
+            copy_to_pipe.join()
+            copy_from_pipe.join()
+
+
+class PostgresCopyExpertToPostgresModule(PipeTask):
+    """Выполняет копирование данных между двумя разными postgres
+    Аналогично выполнению команды insert ... select ..
+    Однако работает между двумя разными postgres в потоковом режиме, без сохранения данных в памяти или на диске
+
+    Запускает оператор copy на двух разных postgres и передаёт поток stdin/stdout через pipe открытый в том месте, где запущен скрипт
+
+    simple_example
+    --------------
+    src_query: str
+        ```sql
+        copy (select * from public.pgbench_history where tid > 4) to stdout
+        ```
+    
+    tgt_query: str
+        ```sql
+        copy public.pgbench_history (tid, aid) from stdin
+        ```
+
+    extended_example - с форматированием потока, если требуется кастомный делимитер, кавычки и т.д.
+    ----------------
+    src_query : str
+        ```sql
+        copy (
+            select * from public.pgbench_history where tid > 4
+        )
+        to stdout with (
+            format csv,
+            header,
+            delimiter ';',
+            quote '"',
+            escape '"'
+        )
+        ```
+
+    tgt_query : str
+        ```sql
+        copy public.pgbench_history (tid, aid)
+        from stdin with (
+            format csv,
+            header,
+            delimiter ';',
+            quote '"',
+            escape '"'
+        )
+        ```
+
+    --------------
+    src_query: str
+        ```sql
+        copy (select * from public.pgbench_history where tid > 4) to stdout
+        ```
+    
+    tgt_query: str
+        ```sql
+        copy public.pgbench_history (tid, aid) from stdin
+        ```
+    """
+
+    def __init__(
+        self,
+        context_key: str,
+        template_render: Callable,
+        src_cur_key: str,
+        src_query: str,
+        tgt_cur_key: str,
+        tgt_query: str,
+        size: Union[int, str],
+    ):
+        super().__init__(context_key)
+        super().set_template_fields(
+            [
+                "src_cur_key",
+                "src_query",
+                "tgt_cur_key",
+                "tgt_query",
+                "size",
+            ]
+        )
+        super().set_template_render(template_render)
+
+        self.src_cur_key = src_cur_key
+        self.src_query = src_query
+        self.tgt_cur_key = tgt_cur_key
+        self.tgt_query = tgt_query
+        self.size = size
+
+    def __call__(self, context):
+        self.render_template_fields(context)
+
+        src_cursor: psycopg2.extensions.cursor = context[self.context_key].get(
+            self.src_cur_key,
+        )
+        tgt_cursor: psycopg2.extensions.cursor = context[self.context_key].get(
+            self.tgt_cur_key,
+        )
+
+        PostgresCopyExpertToPostgres.execute(
+            src_cursor,
+            self.src_query,
+            tgt_cursor,
+            self.tgt_query,
+            self.size,
+        )
+        
+        print(f"src_cursor: {src_cursor.rowcount} rows")
+        print(f"tgt_cursor: {tgt_cursor.rowcount} rows")
+
+
+def pg_copy_to_pg_use_sql(
+    src_cur_key: str,
+    src_query: str,
+    tgt_cur_key: str,
+    tgt_query: str,
+    size: Union[int, str] = 8192,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresCopyExpertToPostgresModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key=src_cur_key,
+                src_query=src_query,
+                tgt_cur_key=tgt_cur_key,
+                tgt_query=tgt_query,
+                size=size,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+class PostgresCopyExpertToHandleModule(PipeTask):
     """Выполняет copy_expert в указанный handler, например sys.stdout
     документация по copy: https://postgrespro.ru/docs/postgresql/14/sql-copy
     пример copy запроса:
@@ -1187,7 +1435,7 @@ def pg_copy_to_handle(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            PostgresCopyExpertModule(
+            PostgresCopyExpertToHandleModule(
                 builder.context_key,
                 builder.template_render,
                 sql,
@@ -1203,7 +1451,7 @@ def pg_copy_to_handle(
     return wrapper
 
 
-class PostgresCopyExpertSqlToStdoutModule(PostgresCopyExpertModule):
+class PostgresCopyExpertToStdoutModule(PostgresCopyExpertToHandleModule):
     def __init__(
         self,
         context_key: str,
@@ -1252,7 +1500,7 @@ def pg_copy_to_stdout(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            PostgresCopyExpertSqlToStdoutModule(
+            PostgresCopyExpertToStdoutModule(
                 builder.context_key,
                 builder.template_render,
                 sql,
@@ -2297,71 +2545,3 @@ class PostgresExecuteAndCommitResultAfterModule(PipeTask):
         pg_cur.execute(res)
 
         return res
-
-
-def pg_res_execute_and_commit(
-    res: Callable[[Any], Any] = lambda res: res,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Выполнить sql запрос результата функции (в том числе commit)
-
-    sql запрос может содержать jinja шаблоны
-    """
-
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteAndCommitResultAfterModule(
-                builder.context_key,
-                builder.template_render,
-                res,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
-
-    return wrapper
-
-
-class PostgresFetchallToXComModuleAfterModule(PipeTask):
-    def __init__(
-        self,
-        context_key: str,
-        template_render: Callable,
-        cur_key: str = pg_cur_key_default,
-    ):
-        super().__init__(context_key)
-        super().set_template_render(template_render)
-
-        self.cur_key = cur_key
-
-    def __call__(self, res, context):
-        self.render_template_fields(context)
-
-        pg_cur: psycopg2.extensions.cursor = context[self.context_key][self.cur_key]
-
-        return pg_cur.fetchall()
-
-
-def pg_res_fetchall_to_xcom(
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить сохранить полученный результат в xco
-    """
-
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresFetchallToXComModuleAfterModule(
-                builder.context_key,
-                builder.template_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
-
-    return wrapper

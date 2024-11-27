@@ -19,6 +19,7 @@ import psycopg2.sql
 from airflow.models.baseoperator import BaseOperator
 
 from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.gun.pg import PostgresCopyExpertToPostgres
 from airflow.providers.gun.pipe import (
     PipeStage,
     PipeTask,
@@ -34,7 +35,7 @@ from airflow.providers.gun.sync.pg_to_pg_schema_sync import (
 )
 
 
-class PostgresFullReloadOverrideColumn:
+class PostgresToPostgresFullReloadOverrideColumn:
     def __init__(
         self,
         name: str,
@@ -58,7 +59,7 @@ class PostgresFullReloadOverrideColumn:
     def __eq__(self, other):
         if isinstance(other, str):
             return self.name == other
-        elif isinstance(other, PostgresFullReloadOverrideColumn):
+        elif isinstance(other, PostgresToPostgresFullReloadOverrideColumn):
             return self.name == other.name
 
         return NotImplemented
@@ -189,13 +190,14 @@ class PostgresFullReloadCompareColumn:
             return val
 
 
-class PostgresFullReload:
+class PostgresToPostgresFullReload:
     def __init__(
         self,
         logger,
-        pg_cursor: psycopg2.extensions.cursor,
+        src_cursor: psycopg2.extensions.cursor,
         src_schema: str,
         src_table: str,
+        tgt_cursor: psycopg2.extensions.cursor,
         tgt_schema: str,
         tgt_table: str,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
@@ -205,9 +207,10 @@ class PostgresFullReload:
         exclude_columns: Optional[Union[str, List[str]]] = None,
     ) -> None:
         self.log = logger
-        self.pg_cursor = pg_cursor
+        self.src_cursor = src_cursor
         self.src_schema = src_schema
         self.src_table = src_table
+        self.tgt_cursor = tgt_cursor
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
         self.rename_columns = rename_columns
@@ -216,7 +219,8 @@ class PostgresFullReload:
         self.pg_man = PostgresManipulator(logger)
 
     def execute(self, context):
-        pg_cursor = self.pg_cursor
+        src_cursor = self.src_cursor
+        tgt_cursor = self.tgt_cursor
 
         (
             src_schema,
@@ -235,9 +239,10 @@ class PostgresFullReload:
         )
 
         self.sync_data(
-            pg_cursor,
+            src_cursor,
             src_schema,
             src_table,
+            tgt_cursor,
             tgt_schema,
             tgt_table,
             rule_columns,
@@ -246,24 +251,26 @@ class PostgresFullReload:
 
     def sync_data(
         self,
-        pg_cursor: psycopg2.extensions.cursor,
+        select_cursor: psycopg2.extensions.cursor,
         select_schema: str,
         select_table: str,
+        insert_cursor: psycopg2.extensions.cursor,
         insert_schema: str,
         insert_table: str,
-        rule_columns: List[PostgresFullReloadOverrideColumn],
+        rule_columns: List[PostgresToPostgresFullReloadOverrideColumn],
         context,
     ):
         self.log.info(
             f"Full reload {select_schema}.{select_table} -> {insert_schema}.{insert_table}"
         )
-        self.log.info(f"pg src: {pg_cursor.connection.dsn}")
-        self.log.info(f"pg tgt: {pg_cursor.connection.dsn}")
+        self.log.info(f"pg src: {select_cursor.connection.dsn}")
+        self.log.info(f"pg tgt: {insert_cursor.connection.dsn}")
 
         union_columns = self.make_fields_info(
-            pg_cursor,
+            select_cursor,
             select_schema,
             select_table,
+            insert_cursor,
             insert_schema,
             insert_table,
             rule_columns,
@@ -277,40 +284,78 @@ class PostgresFullReload:
 
         select_alias = "s"
         select_fields = map(
-            lambda column: column.select_field(select_alias, pg_cursor), columns.copy()
+            lambda column: column.select_field(select_alias, select_cursor), columns.copy()
         )
         select_fields = [x for x in select_fields if x is not None]
 
         select_params = map(
-            lambda column: column.select_param(pg_cursor), columns.copy()
+            lambda column: column.select_param(select_cursor), columns.copy()
         )
         select_params = [x for x in select_params if x is not None]
 
         insert_fields = map(
-            lambda column: column.insert_field(pg_cursor), columns.copy()
+            lambda column: column.insert_field(insert_cursor), columns.copy()
         )
         insert_fields = [x for x in insert_fields if x is not None]
 
         self.pg_man.pg_truncate_table(
-            pg_cursor,
+            insert_cursor,
             insert_schema,
             insert_table,
         )
         
-        self.pg_man.pg_insert_select(
-            pg_cursor,
-            insert_schema,
-            insert_table,
-            insert_fields,
-            select_schema,
-            select_table,
-            select_fields,
-            select_params,
-            select_alias,
-        )
+        # здесь я пытаюсь обойти ограничение которое было заложено в предыдущий раз
+        # весь класс ориентировался на то, что будет работать с одним postgres курсором
+        # все запросы должны были выполняться в одном подключении, соответственно
+        # переливка данных из одной таблицы в другую должна осуществляться простым insert .. select .. запросом
+        # но так как сейчас возникла необходимость реализовать переливку данных между двумя postgres используя разные подключения
+        # здесь я сравниваю два курсора на условие "это один и тот же объект?"
+        # если да, то выполняю перезаливку данных как раньше, в один запрос
+        # если нет, то выполняю перезаливку данных через запуск команды copy на двух разных курсорах
+        if select_cursor is insert_cursor:
+            # обрати внимание, что используется только select_cursor
+            # так как insert_cursor это тот же самый объект, что и select_cursor
+            query_stmp = self.pg_man.pg_insert_select_in_one_postgres(
+                select_cursor,
+                insert_schema,
+                insert_table,
+                insert_fields,
+                select_schema,
+                select_table,
+                select_fields,
+                select_alias,
+            )
 
-        context["target_row"] = pg_cursor.rowcount
-        pg_cursor.connection.commit()
+            select_cursor.execute(query_stmp, select_params)
+            self.log.info(f"pg copy success: {select_cursor.rowcount} rows")
+            context["target_row"] = select_cursor.rowcount
+            select_cursor.connection.commit()
+        else:
+            # обрати внимание, что используется оба курсора select_cursor и insert_cursor
+            copy_from_stmp, copy_to_stmp = self.pg_man.pg_insert_select_between_two_postgres(
+                insert_cursor,
+                insert_schema,
+                insert_table,
+                insert_fields,
+                select_cursor,
+                select_schema,
+                select_table,
+                select_fields,
+                select_alias,
+            )
+
+            PostgresCopyExpertToPostgres.execute(
+                src_cursor=select_cursor,
+                src_query=copy_from_stmp,
+                src_params=select_params,
+                tgt_cursor=insert_cursor,
+                tgt_query=copy_to_stmp,
+                tgt_params=None,
+            )
+
+            self.log.info(f"pg copy success: {insert_cursor.rowcount} rows")
+            context["target_row"] = insert_cursor.rowcount
+            insert_cursor.connection.commit()
 
     def union_src_tgt_and_rules(
         self,
@@ -320,7 +365,7 @@ class PostgresFullReload:
         tgt_table,
         src_info: List[Dict],
         tgt_info: List[Dict],
-        rule_columns: List[PostgresFullReloadOverrideColumn],
+        rule_columns: List[PostgresToPostgresFullReloadOverrideColumn],
     ):
         column_name = "column_name"
         ordinal_position = "ordinal_position"
@@ -475,10 +520,17 @@ class PostgresFullReload:
         return columns
 
     def make_fields_info(
-        self, pg_cursor, src_schema, src_table, tgt_schema, tgt_table, rule_columns
+        self,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
+        rule_columns,
     ):
-        src_info = self.pg_man.pg_get_fields(pg_cursor, src_schema, src_table)
-        tgt_info = self.pg_man.pg_get_fields(pg_cursor, tgt_schema, tgt_table)
+        src_info = self.pg_man.pg_get_fields(src_cursor, src_schema, src_table)
+        tgt_info = self.pg_man.pg_get_fields(tgt_cursor, tgt_schema, tgt_table)
 
         union_columns = self.union_src_tgt_and_rules(
             src_schema,
@@ -502,7 +554,7 @@ class PostgresFullReload:
         override_columns,
         exclude_columns,
     ):
-        res: List[PostgresFullReloadOverrideColumn] = []
+        res: List[PostgresToPostgresFullReloadOverrideColumn] = []
 
         if not rename_columns:
             rename_columns = {}
@@ -535,7 +587,7 @@ rename_columns represents a dict of {
                     val.rename_from = rename_from
                 else:
                     res.append(
-                        PostgresFullReloadOverrideColumn(
+                        PostgresToPostgresFullReloadOverrideColumn(
                             name=name,
                             rendering_type="column",
                             rename_from=rename_from,
@@ -603,7 +655,7 @@ if 'override_type' = {override_value[1]} then 'override_value' can only be strin
                     val.rendering_value = rendering_value
                 else:
                     res.append(
-                        PostgresFullReloadOverrideColumn(
+                        PostgresToPostgresFullReloadOverrideColumn(
                             name=name,
                             rendering_type=rendering_type,
                             rendering_value=rendering_value,
@@ -617,7 +669,7 @@ if 'override_type' = {override_value[1]} then 'override_value' can only be strin
                     val.rendering_value = override_value
                 else:
                     res.append(
-                        PostgresFullReloadOverrideColumn(
+                        PostgresToPostgresFullReloadOverrideColumn(
                             name=name,
                             rendering_type="native",
                             rendering_value=override_value,
@@ -646,7 +698,7 @@ exclude_columns represents a list of ["column_name_1", "column_name_2", ...]
                     val.exclude = True
                 else:
                     res.append(
-                        PostgresFullReloadOverrideColumn(
+                        PostgresToPostgresFullReloadOverrideColumn(
                             name=name,
                             rendering_type="column",
                             exclude=True,
@@ -665,11 +717,12 @@ exclude_columns represents a list of ["column_name_1", "column_name_2", ...]
         )
 
 
-class PostgresFullReloadOperator(BaseOperator):
+class PostgresToPostgresFullReloadOperator(BaseOperator):
     template_fields: Sequence[str] = (
-        "pg_conn_id",
+        "src_conn_id",
         "src_schema",
         "src_table",
+        "tgt_conn_id",
         "tgt_schema",
         "tgt_table",
         "rename_columns",
@@ -679,9 +732,10 @@ class PostgresFullReloadOperator(BaseOperator):
 
     def __init__(
         self,
-        pg_conn_id: str,
+        src_conn_id: str,
         src_schema: str,
         src_table: str,
+        tgt_conn_id: str,
         tgt_schema: str,
         tgt_table: str,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
@@ -694,9 +748,10 @@ class PostgresFullReloadOperator(BaseOperator):
     ) -> None:
         super().__init__(*args, **kwargs)
 
-        self.pg_conn_id = pg_conn_id
+        self.src_conn_id = src_conn_id
         self.src_schema = src_schema
         self.src_table = src_table
+        self.tgt_conn_id = tgt_conn_id
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
         self.rename_columns = rename_columns
@@ -705,14 +760,18 @@ class PostgresFullReloadOperator(BaseOperator):
         self.stack = ExitStack()
 
     def execute(self, context):
-        pg_hook = PostgresHook(postgres_conn_id=self.pg_conn_id)
-        pg_cursor = self.stack.enter_context(closing(pg_hook.get_cursor()))
+        src_hook = PostgresHook(postgres_conn_id=self.src_conn_id)
+        src_cursor = self.stack.enter_context(closing(src_hook.get_cursor()))
 
-        base_module = PostgresFullReload(
+        tgt_hook = PostgresHook(postgres_conn_id=self.tgt_conn_id)
+        tgt_cursor = self.stack.enter_context(closing(tgt_hook.get_cursor()))
+
+        base_module = PostgresToPostgresFullReload(
             self.log,
-            pg_cursor,
+            src_cursor,
             self.src_schema,
             self.src_table,
+            tgt_cursor,
             self.tgt_schema,
             self.tgt_table,
             self.rename_columns,
@@ -723,14 +782,15 @@ class PostgresFullReloadOperator(BaseOperator):
         base_module.execute(context)
 
 
-class PostgresFullReloadModule(PipeTask):
+class PostgresToPostgresFullReloadModule(PipeTask):
     def __init__(
         self,
         context_key: str,
         template_render: Callable,
-        pg_cur_key: Optional[str],
+        src_cur_key: Optional[str],
         src_schema: str,
         src_table: str,
+        tgt_cur_key: Optional[str],
         tgt_schema: str,
         tgt_table: str,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
@@ -742,9 +802,10 @@ class PostgresFullReloadModule(PipeTask):
         super().__init__(context_key)
         super().set_template_fields(
             (
-                "pg_cur_key",
+                "src_cur_key",
                 "src_schema",
                 "src_table",
+                "tgt_cur_key",
                 "tgt_schema",
                 "tgt_table",
                 "rename_columns",
@@ -754,10 +815,15 @@ class PostgresFullReloadModule(PipeTask):
         )
         super().set_template_render(template_render)
 
-        if pg_cur_key:
-            self.pg_cur_key = pg_cur_key
+        if src_cur_key:
+            self.src_cur_key = src_cur_key
         else:
-            self.pg_cur_key = "pg_cur"
+            self.src_cur_key = "pg_cur"
+
+        if tgt_cur_key:
+            self.tgt_cur_key = tgt_cur_key
+        else:
+            self.tgt_cur_key = "pg_cur"
 
         self.src_schema = src_schema
         self.src_table = src_table
@@ -770,23 +836,34 @@ class PostgresFullReloadModule(PipeTask):
     def __call__(self, context):
         self.render_template_fields(context)
 
-        match context[self.context_key].get(self.pg_cur_key):
+        match context[self.context_key].get(self.src_cur_key):
             case None:
                 raise RuntimeError(
-                    """Could not find postgres cursor (postgres connection)
+                    """Could not find src postgres cursor (postgres connection)
 Before using module, you need to define postgres connection.
 This can be done via 'pg_auth_airflow_conn'"""
                 )
-            case pg_cursor:
-                pg_cursor: psycopg2.extensions.cursor = pg_cursor
+            case src_cursor:
+                src_cursor: psycopg2.extensions.cursor = src_cursor
+        
+        match context[self.context_key].get(self.tgt_cur_key):
+            case None:
+                raise RuntimeError(
+                    """Could not find tgt postgres cursor (postgres connection)
+Before using module, you need to define postgres connection.
+This can be done via 'pg_auth_airflow_conn'"""
+                )
+            case tgt_cursor:
+                tgt_cursor: psycopg2.extensions.cursor = tgt_cursor
 
         log = logging.getLogger(self.__class__.__name__)
 
-        base_module = PostgresFullReload(
+        base_module = PostgresToPostgresFullReload(
             log,
-            pg_cursor,
+            src_cursor,
             self.src_schema,
             self.src_table,
+            tgt_cursor,
             self.tgt_schema,
             self.tgt_table,
             self.rename_columns,
@@ -838,12 +915,75 @@ def pg_full_reload(
         )
 
         builder.add_module(
-            PostgresFullReloadModule(
+            PostgresToPostgresFullReloadModule(
                 builder.context_key,
                 builder.template_render,
                 pg_cur_key,
                 src_schema,
                 src_table,
+                tgt_schema,
+                tgt_table,
+                rename_columns,
+                override_columns,
+                exclude_columns,
+            ),
+            pipe_stage,
+        )
+
+        return builder
+
+    return wrapper
+
+
+def pg_to_pg_full_reload(
+    src_schema: str,
+    src_table: str,
+    tgt_schema: str,
+    tgt_table: str,
+    src_table_check: bool = True,
+    schema_strategy: Union[
+        PostgresToPostgresSchemaStrategy, str
+    ] = PostgresToPostgresSchemaStrategy("create_table_if_not_exists"),
+    rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+    override_schema: Optional[Union[str, Dict[str, str]]] = None,
+    override_columns: Optional[
+        Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
+    ] = None,
+    exclude_columns: Optional[Union[str, List[str]]] = None,
+    create_table_template: str = "create table {pg_table} ({pg_columns})",
+    src_cur_key: Optional[str] = None,
+    tgt_cur_key: Optional[str] = None,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresToPostgresSchemaSyncModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
+                tgt_schema,
+                tgt_table,
+                src_table_check,
+                schema_strategy,
+                rename_columns,
+                override_schema,
+                exclude_columns,
+                create_table_template,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresToPostgresFullReloadModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
                 tgt_schema,
                 tgt_table,
                 rename_columns,
