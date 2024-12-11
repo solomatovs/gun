@@ -36,7 +36,7 @@ __all__ = [
     "pg_commit",
     "pg_module",
     "pg_copy_to_pg",
-    "pg_copy_to_pg_use_sql",
+    "pg_copy_to_pg_use_query",
     "pg_copy_to_handle",
     "pg_copy_to_stdout",
     "pg_copy_to_file",
@@ -140,7 +140,7 @@ class PrintSqlCursor(psycopg2.extensions.cursor):
             print(f"---- call error: {e}", file=sys.stderr)
             raise
 
-    def copy_expert(self, sql, file, size, /):
+    def copy_expert(self, sql, file, size, *args, **kwargs):
         try:
             print(f"---- copy ----")
             print(self.connection.dsn)
@@ -824,8 +824,8 @@ class CopyFromPipeThread(threading.Thread):
         finally:
             self.read_f.close()
 
-    def join(self):
-        threading.Thread.join(self)
+    def join(self, timeout=None):
+        threading.Thread.join(self, timeout)
 
         if self.exc:
             raise self.exc
@@ -895,8 +895,8 @@ class CopyToPipeThread(threading.Thread):
         finally:
             self.write_f.close()
 
-    def join(self):
-        threading.Thread.join(self)
+    def join(self, timeout=None):
+        threading.Thread.join(self, timeout)
 
         if self.exc:
             raise self.exc
@@ -1144,13 +1144,14 @@ class CopyExpertPipeThread(threading.Thread):
         finally:
             self.read_f.close()
 
-    def join(self):
-        threading.Thread.join(self)
+    def join(self, timeout=None):
+        threading.Thread.join(self, timeout)
 
         if self.exc:
             raise self.exc
 
 class PostgresCopyExpertToPostgres:
+    @staticmethod
     def execute(
         src_cursor: psycopg2.extensions.cursor,
         src_query: str,
@@ -1182,9 +1183,6 @@ class PostgresCopyExpertToPostgres:
         if not isinstance(size, int):
             raise RuntimeError(f"parameter 'size' incorrect type {type(size)}")
         
-        # print(f"src: {src_cursor.connection.dsn}")
-        # print(f"tgt: {tgt_cursor.connection.dsn}")
-
         r_fd, w_fd = os.pipe()
 
         with ExitStack() as stack:
@@ -1285,8 +1283,10 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
         template_render: Callable,
         src_cur_key: str,
         src_query: str,
+        src_params: Any,
         tgt_cur_key: str,
         tgt_query: str,
+        tgt_params: Any,
         size: Union[int, str],
     ):
         super().__init__(context_key)
@@ -1294,8 +1294,10 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
             [
                 "src_cur_key",
                 "src_query",
+                "src_params",
                 "tgt_cur_key",
                 "tgt_query",
+                "tgt_params",
                 "size",
             ]
         )
@@ -1303,8 +1305,10 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
 
         self.src_cur_key = src_cur_key
         self.src_query = src_query
+        self.src_params = src_params
         self.tgt_cur_key = tgt_cur_key
         self.tgt_query = tgt_query
+        self.tgt_params = tgt_params
         self.size = size
 
     def __call__(self, context):
@@ -1317,23 +1321,31 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
             self.tgt_cur_key,
         )
 
+        size = int(self.size) or None
         PostgresCopyExpertToPostgres.execute(
             src_cursor,
             self.src_query,
+            self.src_params,
             tgt_cursor,
             self.tgt_query,
-            self.size,
+            self.tgt_params,
+            size,
         )
         
         print(f"src_cursor: {src_cursor.rowcount} rows")
         print(f"tgt_cursor: {tgt_cursor.rowcount} rows")
 
+        src_cursor.connection.commit()
+        tgt_cursor.connection.commit()
 
-def pg_copy_to_pg_use_sql(
+
+def pg_copy_to_pg_use_query(
     src_cur_key: str,
     src_query: str,
     tgt_cur_key: str,
     tgt_query: str,
+    src_params: Optional[Any] = None,
+    tgt_params: Optional[Any] = None,
     size: Union[int, str] = 8192,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1344,8 +1356,10 @@ def pg_copy_to_pg_use_sql(
                 builder.template_render,
                 src_cur_key=src_cur_key,
                 src_query=src_query,
+                src_params=src_params,
                 tgt_cur_key=tgt_cur_key,
                 tgt_query=tgt_query,
+                tgt_params=tgt_params,
                 size=size,
             ),
             pipe_stage,
@@ -2517,31 +2531,31 @@ def pg_register_range(
     return wrapper
 
 
-class PostgresExecuteAndCommitResultAfterModule(PipeTask):
-    """
-    Выполняет sql запрос полученного результата (в том числе выполняет commit)
-    """
+# class PostgresExecuteAndCommitResultAfterModule(PipeTask):
+#     """
+#     Выполняет sql запрос полученного результата (в том числе выполняет commit)
+#     """
 
-    def __init__(
-        self,
-        context_key: str,
-        template_render: Callable,
-        res_matcher: Callable[[Any], Any],
-        cur_key: str = pg_cur_key_default,
-    ):
-        super().__init__(context_key)
-        super().set_template_render(template_render)
+#     def __init__(
+#         self,
+#         context_key: str,
+#         template_render: Callable,
+#         res_matcher: Callable[[Any], Any],
+#         cur_key: str = pg_cur_key_default,
+#     ):
+#         super().__init__(context_key)
+#         super().set_template_render(template_render)
 
-        self.cur_key = cur_key
-        self.res_matcher = res_matcher
+#         self.cur_key = cur_key
+#         self.res_matcher = res_matcher
 
-    def __call__(self, res: Any, context):
-        self.render_template_fields(context)
+#     def __call__(self, res: Any, context):
+#         self.render_template_fields(context)
 
-        res = self.res_matcher(res)
-        self.template_render(res, context)
+#         res = self.res_matcher(res)
+#         self.template_render(res, context)
 
-        pg_cur: psycopg2.extensions.cursor = context[self.context_key][self.cur_key]
-        pg_cur.execute(res)
+#         pg_cur: psycopg2.extensions.cursor = context[self.context_key][self.cur_key]
+#         pg_cur.execute(res)
 
-        return res
+#         return res

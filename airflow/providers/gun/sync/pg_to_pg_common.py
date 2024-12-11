@@ -765,6 +765,51 @@ alter table {pg_schema_back}.{pg_table} rename to {pg_table_back};"""
         cursor.execute(stmp)
 
 
+    def pg_delete_range_from_table(
+        self,
+        cursor: psycopg2.extensions.cursor,
+        schema: str,
+        table: str,
+        field: str,
+        period_from: datetime,
+        period_to: datetime,
+    ):
+        tmpl = """
+delete from {table_path} as {alias}
+where 1=1
+    and {field} >= %(period_from)s
+    and {field} <  %(period_to)s
+"""
+        del_alias = "d"
+
+        _table_path = self._table_path_exp(cursor, schema, table)
+        _field = (
+            psycopg2.sql.SQL("{}.{}")
+            .format(
+                psycopg2.sql.Identifier(del_alias),
+                psycopg2.sql.Identifier(field),
+            )
+            .as_string(cursor)
+        )
+        _alias = psycopg2.sql.SQL("{}").format(
+            psycopg2.sql.Identifier(del_alias),
+        ).as_string(cursor)
+
+        stmp = tmpl.format(**{
+                "table_path": _table_path,
+                "field": _field,
+                "alias": _alias,
+            }
+        )
+
+        stmp = cursor.mogrify(stmp, {
+            "period_from": period_from,
+            "period_to": period_to,
+        }).decode(encoding='utf-8', errors='strict')
+        
+        cursor.execute(stmp)
+
+
     def pg_insert_select_in_one_postgres(
         self,
         cursor: psycopg2.extensions.cursor,

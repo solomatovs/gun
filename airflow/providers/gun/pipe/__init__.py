@@ -315,52 +315,52 @@ class PipeDecoratorCollection:
 pipe = PipeDecoratorCollection()
 
 
-class JinjaRenderResultModule(PipeTask):
-    def __init__(
-        self,
-        context_key: str,
-        template_render: Callable,
-    ):
-        super().__init__(context_key)
-        super().set_template_render(template_render)
+# class JinjaRenderResultModule(PipeTask):
+#     def __init__(
+#         self,
+#         context_key: str,
+#         template_render: Callable,
+#     ):
+#         super().__init__(context_key)
+#         super().set_template_render(template_render)
 
-    def __call__(self, context: Context):
-        match context.get(self.task_result_key):
-            case None:
-                return (None,)
-            case res:
-                res = self.template_render(res, context)
+#     def __call__(self, context: Context):
+#         match context.get(self.task_result_key):
+#             case None:
+#                 return (None,)
+#             case res:
+#                 res = self.template_render(res, context)
 
-        return res
+#         return res
 
 
-def jinja_result():
-    """
-    Выполняет рендеринг через Jinja результата декорируемой функции
+# def jinja_result():
+#     """
+#     Выполняет рендеринг через Jinja результата декорируемой функции
 
-    например если декорируемая функция вернула:
-    ```python
-    @task()
-    @result_render(0)
-    @pipe()
-    def my_super_task(context)
-        context["my_name"] = "milfa"
-        return "select '{{ my_name }}' as name"
-    ```
-    то на выходе в xcom фактически добавится
-    ```python
-    "select 'milfa' as name"
-    ```
-    """
+#     например если декорируемая функция вернула:
+#     ```python
+#     @task()
+#     @result_render(0)
+#     @pipe()
+#     def my_super_task(context)
+#         context["my_name"] = "milfa"
+#         return "select '{{ my_name }}' as name"
+#     ```
+#     то на выходе в xcom фактически добавится
+#     ```python
+#     "select 'milfa' as name"
+#     ```
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            JinjaRenderResultModule(
-                builder.context_key,
-                builder.template_render,
-            ),
-            PipeStage.After,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             JinjaRenderResultModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#             ),
+#             PipeStage.After,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper

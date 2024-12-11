@@ -7,11 +7,15 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    TypedDict,
 )
+from typing import Protocol
 import itertools
 import logging
 from functools import total_ordering
 from contextlib import closing, ExitStack
+from enum import Enum
+from datetime import datetime
 
 import psycopg2.extras
 import psycopg2.sql
@@ -35,7 +39,7 @@ from airflow.providers.gun.sync.pg_to_pg_schema_sync import (
 )
 
 
-class PostgresToPostgresFullReloadOverrideColumn:
+class PostgresToPostgresDataReloadOverrideColumn:
     def __init__(
         self,
         name: str,
@@ -59,14 +63,14 @@ class PostgresToPostgresFullReloadOverrideColumn:
     def __eq__(self, other):
         if isinstance(other, str):
             return self.name == other
-        elif isinstance(other, PostgresToPostgresFullReloadOverrideColumn):
+        elif isinstance(other, PostgresToPostgresDataReloadOverrideColumn):
             return self.name == other.name
 
         return NotImplemented
 
 
 @total_ordering
-class PostgresFullReloadCompareColumn:
+class PostgresToPostgresDataReloadCompareColumn:
     def __init__(
         self,
         name: str,
@@ -99,7 +103,7 @@ class PostgresFullReloadCompareColumn:
     def __eq__(self, other):
         if isinstance(other, str):
             return self.name == other
-        elif isinstance(other, PostgresFullReloadCompareColumn):
+        elif isinstance(other, PostgresToPostgresDataReloadCompareColumn):
             return self.name == other.name
 
         return NotImplemented
@@ -143,7 +147,7 @@ class PostgresFullReloadCompareColumn:
         elif self.rendering_value is not None:
             match self.rendering_type:
                 case "column":
-                    val = psycopg2.sql.Identifier(self.rendering_value)
+                    val = psycopg2.sql.Identifier(alias, self.rendering_value)
                     val = val.as_string(pg_cursor)
                     return val
                 case "exp":
@@ -190,7 +194,70 @@ class PostgresFullReloadCompareColumn:
             return val
 
 
-class PostgresToPostgresFullReload:
+class PostgresDeleteRunner():
+    def execute(self,
+        context,
+        cursor,
+        schema,
+        table,
+    ):
+        pass
+
+    @staticmethod
+    def type_dict_validate(typ: Any, instance: Any):
+        res = True
+        res_text = ""
+
+        for property_name, property_type in typ.__annotations__.items():
+            value = instance.get(property_name, None)
+
+            if value is None:
+                res_text += f"\nmissing key: {property_name}"
+                res = False
+
+            elif property_type not in (int, float, bool, str):
+                inner_res, inner_text = PostgresDeleteRunner.type_dict_validate(property_type, value)
+
+                res_text += inner_text
+                if inner_res is False:
+                    res = False
+            
+            elif not isinstance(value, property_type):
+                res_text += f"\nWrong type: {property_name}. Expected {property_type}, got {type(value)}"
+                res = False
+        
+        return res, res_text
+
+class PostgresDoNothingRunner(PostgresDeleteRunner):
+    def execute(self,
+        context,
+        cursor,
+        schema,
+        table,
+    ):
+        log = logging.getLogger(self.__class__.__name__)
+        log.info("removal strategy: do nothing")
+
+
+class PostgresTruncateRunner(PostgresDeleteRunner):
+    def execute(self,
+        context,
+        cursor,
+        schema,
+        table,
+    ):
+        log = logging.getLogger(self.__class__.__name__)
+        log.info("removal strategy: truncate")
+
+        pg_man = PostgresManipulator(log)
+        pg_man.pg_truncate_table(
+            cursor,
+            schema,
+            table,
+        )
+
+
+class PostgresToPostgresDataReload:
     def __init__(
         self,
         logger,
@@ -200,6 +267,7 @@ class PostgresToPostgresFullReload:
         tgt_cursor: psycopg2.extensions.cursor,
         tgt_schema: str,
         tgt_table: str,
+        tgt_delete: PostgresDeleteRunner,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
         override_columns: Optional[
             Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
@@ -213,6 +281,7 @@ class PostgresToPostgresFullReload:
         self.tgt_cursor = tgt_cursor
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
+        self.tgt_delete = tgt_delete
         self.rename_columns = rename_columns
         self.override_columns = override_columns
         self.exclude_columns = exclude_columns
@@ -227,12 +296,14 @@ class PostgresToPostgresFullReload:
             src_table,
             tgt_schema,
             tgt_table,
+            tgt_delete,
             rule_columns,
         ) = self.clean_validate_and_flatten_params(
             self.src_schema,
             self.src_table,
             self.tgt_schema,
             self.tgt_table,
+            self.tgt_delete,
             self.rename_columns,
             self.override_columns,
             self.exclude_columns,
@@ -245,34 +316,36 @@ class PostgresToPostgresFullReload:
             tgt_cursor,
             tgt_schema,
             tgt_table,
+            tgt_delete,
             rule_columns,
             context,
         )
 
     def sync_data(
         self,
-        select_cursor: psycopg2.extensions.cursor,
-        select_schema: str,
-        select_table: str,
-        insert_cursor: psycopg2.extensions.cursor,
-        insert_schema: str,
-        insert_table: str,
-        rule_columns: List[PostgresToPostgresFullReloadOverrideColumn],
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema: str,
+        src_table: str,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_schema: str,
+        tgt_table: str,
+        tgt_delete: PostgresDeleteRunner,
+        rule_columns: List[PostgresToPostgresDataReloadOverrideColumn],
         context,
     ):
         self.log.info(
-            f"Full reload {select_schema}.{select_table} -> {insert_schema}.{insert_table}"
+            f"sync data: {src_schema}.{src_table} -> {tgt_schema}.{tgt_table}"
         )
-        self.log.info(f"pg src: {select_cursor.connection.dsn}")
-        self.log.info(f"pg tgt: {insert_cursor.connection.dsn}")
+        self.log.info(f"pg src: {src_cursor.connection.dsn}")
+        self.log.info(f"pg tgt: {tgt_cursor.connection.dsn}")
 
         union_columns = self.make_fields_info(
-            select_cursor,
-            select_schema,
-            select_table,
-            insert_cursor,
-            insert_schema,
-            insert_table,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
             rule_columns,
         )
 
@@ -284,78 +357,93 @@ class PostgresToPostgresFullReload:
 
         select_alias = "s"
         select_fields = map(
-            lambda column: column.select_field(select_alias, select_cursor), columns.copy()
+            lambda column: column.select_field(select_alias, src_cursor), columns.copy()
         )
         select_fields = [x for x in select_fields if x is not None]
 
         select_params = map(
-            lambda column: column.select_param(select_cursor), columns.copy()
+            lambda column: column.select_param(src_cursor), columns.copy()
         )
         select_params = [x for x in select_params if x is not None]
 
         insert_fields = map(
-            lambda column: column.insert_field(insert_cursor), columns.copy()
+            lambda column: column.insert_field(tgt_cursor), columns.copy()
         )
         insert_fields = [x for x in insert_fields if x is not None]
 
-        self.pg_man.pg_truncate_table(
-            insert_cursor,
-            insert_schema,
-            insert_table,
+        target_row = 0
+
+        tgt_delete.execute(
+            context,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
         )
+        self.log.info(f"tgt status: {tgt_cursor.statusmessage}")
+        if tgt_cursor.rowcount != -1:
+            target_row += tgt_cursor.rowcount
         
-        # здесь я пытаюсь обойти ограничение которое было заложено в предыдущий раз
-        # весь класс ориентировался на то, что будет работать с одним postgres курсором
-        # все запросы должны были выполняться в одном подключении, соответственно
-        # переливка данных из одной таблицы в другую должна осуществляться простым insert .. select .. запросом
+        # здесь я пытаюсь обойти ограничение которое было заложено в предыдущем релизе
+        # весь класс был спроектирован на то, что будет работать с одним postgres курсором (одно postgres подключение)
+        # все запросы должны были выполняться в одном подключении, соответственно для
+        # перезагрузки данных из одной таблицы в другую нужно было осуществить простой insert .. select .. запрос
         # но так как сейчас возникла необходимость реализовать переливку данных между двумя postgres используя разные подключения
         # здесь я сравниваю два курсора на условие "это один и тот же объект?"
         # если да, то выполняю перезаливку данных как раньше, в один запрос
         # если нет, то выполняю перезаливку данных через запуск команды copy на двух разных курсорах
-        if select_cursor is insert_cursor:
+        if src_cursor is tgt_cursor:
             # обрати внимание, что используется только select_cursor
             # так как insert_cursor это тот же самый объект, что и select_cursor
             query_stmp = self.pg_man.pg_insert_select_in_one_postgres(
-                select_cursor,
-                insert_schema,
-                insert_table,
+                src_cursor,
+                tgt_schema,
+                tgt_table,
                 insert_fields,
-                select_schema,
-                select_table,
+                src_schema,
+                src_table,
                 select_fields,
                 select_alias,
             )
-
-            select_cursor.execute(query_stmp, select_params)
-            self.log.info(f"pg copy success: {select_cursor.rowcount} rows")
-            context["target_row"] = select_cursor.rowcount
-            select_cursor.connection.commit()
+            
+            src_cursor.execute(query_stmp, select_params)
+            self.log.info(f"rows: {src_cursor.rowcount}")
+            if src_cursor.rowcount != -1:
+                target_row += src_cursor.rowcount
+            
+            context["target_row"] = target_row
+            src_cursor.connection.commit()
         else:
             # обрати внимание, что используется оба курсора select_cursor и insert_cursor
+            # потому что были переданы разные объекты в эти переменные
             copy_from_stmp, copy_to_stmp = self.pg_man.pg_insert_select_between_two_postgres(
-                insert_cursor,
-                insert_schema,
-                insert_table,
+                tgt_cursor,
+                tgt_schema,
+                tgt_table,
                 insert_fields,
-                select_cursor,
-                select_schema,
-                select_table,
+                src_cursor,
+                src_schema,
+                src_table,
                 select_fields,
                 select_alias,
             )
 
             PostgresCopyExpertToPostgres.execute(
-                src_cursor=select_cursor,
+                src_cursor=src_cursor,
                 src_query=copy_from_stmp,
                 src_params=select_params,
-                tgt_cursor=insert_cursor,
+                tgt_cursor=tgt_cursor,
                 tgt_query=copy_to_stmp,
                 tgt_params=None,
             )
 
-            self.log.info(f"pg copy success: {insert_cursor.rowcount} rows")
-            context["target_row"] = insert_cursor.rowcount
-            insert_cursor.connection.commit()
+            self.log.info(f"select rows: {src_cursor.rowcount}")
+            self.log.info(f"insert rows: {tgt_cursor.rowcount}")
+
+            if tgt_cursor.rowcount != -1:
+                target_row += tgt_cursor.rowcount
+
+            context["target_row"] = target_row
+            tgt_cursor.connection.commit()
 
     def union_src_tgt_and_rules(
         self,
@@ -365,7 +453,7 @@ class PostgresToPostgresFullReload:
         tgt_table,
         src_info: List[Dict],
         tgt_info: List[Dict],
-        rule_columns: List[PostgresToPostgresFullReloadOverrideColumn],
+        rule_columns: List[PostgresToPostgresDataReloadOverrideColumn],
     ):
         column_name = "column_name"
         ordinal_position = "ordinal_position"
@@ -374,7 +462,7 @@ class PostgresToPostgresFullReload:
         # выбиру из src имена и переопределю их через override_columns
         src_fields = list(
             map(
-                lambda x: PostgresFullReloadCompareColumn(
+                lambda x: PostgresToPostgresDataReloadCompareColumn(
                     name=x[column_name],
                     src_schema=src_schema,
                     src_table=src_table,
@@ -390,7 +478,7 @@ class PostgresToPostgresFullReload:
         )
         tgt_fields = list(
             map(
-                lambda x: PostgresFullReloadCompareColumn(
+                lambda x: PostgresToPostgresDataReloadCompareColumn(
                     name=x[column_name],
                     src_schema=src_schema,
                     src_table=src_table,
@@ -432,7 +520,7 @@ class PostgresToPostgresFullReload:
 
         # объединяю информацию в один список PostgresToPostgresFullReloadCompareColumn, где будут находится все атрибуты сравнения
         # src_info, tgt_info, override_columns
-        columns: List[PostgresFullReloadCompareColumn] = []
+        columns: List[PostgresToPostgresDataReloadCompareColumn] = []
         max_ordinal = 0
         for src, tgt, rule in itertools.zip_longest(
             src_fields, tgt_fields, rule_columns, fillvalue=None
@@ -501,7 +589,7 @@ class PostgresToPostgresFullReload:
                 else:
                     max_ordinal += 1
                     columns.append(
-                        PostgresFullReloadCompareColumn(
+                        PostgresToPostgresDataReloadCompareColumn(
                             name=rule.name,
                             src_schema=src_schema,
                             src_table=src_table,
@@ -550,11 +638,12 @@ class PostgresToPostgresFullReload:
         src_table,
         tgt_schema,
         tgt_table,
+        tgt_delete,
         rename_columns,
         override_columns,
         exclude_columns,
     ):
-        res: List[PostgresToPostgresFullReloadOverrideColumn] = []
+        rules: List[PostgresToPostgresDataReloadOverrideColumn] = []
 
         if not rename_columns:
             rename_columns = {}
@@ -575,19 +664,19 @@ rename_columns represents a dict of {
         for name, rename_from in rename_columns.items():
             if isinstance(name, str) and isinstance(rename_from, str):
                 index = None
-                for i in range(len(res)):
-                    val = res[i]
+                for i in range(len(rules)):
+                    val = rules[i]
                     if val.name == rename_from:
                         index = i
                         break
 
                 if index is not None:
-                    val = res[index]
+                    val = rules[index]
                     val.name = name
                     val.rename_from = rename_from
                 else:
-                    res.append(
-                        PostgresToPostgresFullReloadOverrideColumn(
+                    rules.append(
+                        PostgresToPostgresDataReloadOverrideColumn(
                             name=name,
                             rendering_type="column",
                             rename_from=rename_from,
@@ -649,13 +738,13 @@ if 'override_type' = {override_value[1]} then 'override_value' can only be strin
                 else:
                     raise RuntimeError(type_error.format(type(override_columns)))
 
-                if name in res:
-                    val = res[res.index(name)]
+                if name in rules:
+                    val = rules[rules.index(name)]
                     val.rendering_type = rendering_type
                     val.rendering_value = rendering_value
                 else:
-                    res.append(
-                        PostgresToPostgresFullReloadOverrideColumn(
+                    rules.append(
+                        PostgresToPostgresDataReloadOverrideColumn(
                             name=name,
                             rendering_type=rendering_type,
                             rendering_value=rendering_value,
@@ -663,13 +752,13 @@ if 'override_type' = {override_value[1]} then 'override_value' can only be strin
                     )
 
             elif isinstance(name, str):
-                if name in res:
-                    val = res[res.index(name)]
+                if name in rules:
+                    val = rules[rules.index(name)]
                     val.rendering_type = "native"
                     val.rendering_value = override_value
                 else:
-                    res.append(
-                        PostgresToPostgresFullReloadOverrideColumn(
+                    rules.append(
+                        PostgresToPostgresDataReloadOverrideColumn(
                             name=name,
                             rendering_type="native",
                             rendering_value=override_value,
@@ -693,12 +782,12 @@ exclude_columns represents a list of ["column_name_1", "column_name_2", ...]
 
         for name in exclude_columns:
             if isinstance(name, str):
-                if name in res:
-                    val = res[res.index(name)]
+                if name in rules:
+                    val = rules[rules.index(name)]
                     val.exclude = True
                 else:
-                    res.append(
-                        PostgresToPostgresFullReloadOverrideColumn(
+                    rules.append(
+                        PostgresToPostgresDataReloadOverrideColumn(
                             name=name,
                             rendering_type="column",
                             exclude=True,
@@ -708,14 +797,56 @@ exclude_columns represents a list of ["column_name_1", "column_name_2", ...]
             else:
                 raise RuntimeError(type_error)
 
+        # выполняю валидацию tgt_delete
+        if tgt_delete is None:
+            # по умолчанию выбираю отсутствие удаления, если ничего небыло передано
+            tgt_delete = PostgresDoNothingRunner()
+
+        if not isinstance(tgt_delete, PostgresDeleteRunner):
+            raise RuntimeError(f"""tgt_delete parameter unsupported type: {type(tgt_delete)}
+parameter tgt_delete must be of type PostgresDeleteRunner and support variants:
+- PostgresDoNothingRunner
+- PostgresTruncateRunner
+- PostgresDeleteRangeRunner
+    """)
+
         return (
             src_schema,
             src_table,
             tgt_schema,
             tgt_table,
-            res,
+            tgt_delete,
+            rules,
         )
 
+
+class PostgresToPostgresFullReload(PostgresToPostgresDataReload):
+    def __init__(
+        self,
+        logger,
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema: str,
+        src_table: str,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_schema: str,
+        tgt_table: str,
+        rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+        override_columns: Optional[Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]] = None,
+        exclude_columns: Optional[Union[str, List[str]]] = None,
+    ) -> None:
+        super().__init__(
+            logger,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            tgt_delete=PostgresTruncateRunner(),
+            rename_columns=rename_columns,
+            override_columns=override_columns,
+            exclude_columns=exclude_columns,
+        )
 
 class PostgresToPostgresFullReloadOperator(BaseOperator):
     template_fields: Sequence[str] = (
@@ -757,6 +888,7 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
         self.rename_columns = rename_columns
         self.override_columns = override_columns
         self.exclude_columns = exclude_columns
+        self.tgt_delete = PostgresTruncateRunner()
         self.stack = ExitStack()
 
     def execute(self, context):
@@ -766,7 +898,7 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
         tgt_hook = PostgresHook(postgres_conn_id=self.tgt_conn_id)
         tgt_cursor = self.stack.enter_context(closing(tgt_hook.get_cursor()))
 
-        base_module = PostgresToPostgresFullReload(
+        base_module = PostgresToPostgresDataReload(
             self.log,
             src_cursor,
             self.src_schema,
@@ -774,15 +906,16 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
             tgt_cursor,
             self.tgt_schema,
             self.tgt_table,
-            self.rename_columns,
-            self.override_columns,
-            self.exclude_columns,
+            tgt_delete=self.tgt_delete,
+            rename_columns=self.rename_columns,
+            override_columns=self.override_columns,
+            exclude_columns=self.exclude_columns,
         )
 
         base_module.execute(context)
 
 
-class PostgresToPostgresFullReloadModule(PipeTask):
+class PostgresToPostgresDataReloadModule(PipeTask):
     def __init__(
         self,
         context_key: str,
@@ -793,6 +926,7 @@ class PostgresToPostgresFullReloadModule(PipeTask):
         tgt_cur_key: Optional[str],
         tgt_schema: str,
         tgt_table: str,
+        tgt_delete: PostgresDeleteRunner,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
         override_columns: Optional[
             Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
@@ -829,6 +963,7 @@ class PostgresToPostgresFullReloadModule(PipeTask):
         self.src_table = src_table
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
+        self.tgt_delete = tgt_delete
         self.rename_columns = rename_columns
         self.override_columns = override_columns
         self.exclude_columns = exclude_columns
@@ -858,7 +993,7 @@ This can be done via 'pg_auth_airflow_conn'"""
 
         log = logging.getLogger(self.__class__.__name__)
 
-        base_module = PostgresToPostgresFullReload(
+        base_module = PostgresToPostgresDataReload(
             log,
             src_cursor,
             self.src_schema,
@@ -866,9 +1001,10 @@ This can be done via 'pg_auth_airflow_conn'"""
             tgt_cursor,
             self.tgt_schema,
             self.tgt_table,
-            self.rename_columns,
-            self.override_columns,
-            self.exclude_columns,
+            self.tgt_delete,
+            rename_columns=self.rename_columns,
+            override_columns=self.override_columns,
+            exclude_columns=self.exclude_columns,
         )
 
         base_module.execute(context)
@@ -915,17 +1051,19 @@ def pg_full_reload(
         )
 
         builder.add_module(
-            PostgresToPostgresFullReloadModule(
+            PostgresToPostgresDataReloadModule(
                 builder.context_key,
                 builder.template_render,
                 pg_cur_key,
                 src_schema,
                 src_table,
+                pg_cur_key,
                 tgt_schema,
                 tgt_table,
-                rename_columns,
-                override_columns,
-                exclude_columns,
+                tgt_delete=PostgresTruncateRunner(),
+                rename_columns=rename_columns,
+                override_columns=override_columns,
+                exclude_columns=exclude_columns,
             ),
             pipe_stage,
         )
@@ -977,7 +1115,7 @@ def pg_to_pg_full_reload(
         )
 
         builder.add_module(
-            PostgresToPostgresFullReloadModule(
+            PostgresToPostgresDataReloadModule(
                 builder.context_key,
                 builder.template_render,
                 src_cur_key,
@@ -986,6 +1124,186 @@ def pg_to_pg_full_reload(
                 tgt_cur_key,
                 tgt_schema,
                 tgt_table,
+                tgt_delete=PostgresTruncateRunner(),
+                rename_columns=rename_columns,
+                override_columns=override_columns,
+                exclude_columns=exclude_columns,
+            ),
+            pipe_stage,
+        )
+
+        return builder
+
+    return wrapper
+
+
+class PostgresDeletePeriodModel(TypedDict):
+    field: str
+    period_from: datetime
+    period_to: datetime
+
+
+def validate_delete_period_model(self: PostgresDeletePeriodModel):
+    res = True
+    res_text = ""
+
+    field_name = "field"
+    match self.get(field_name):
+        case None:
+            res = False
+            res_text += f"\nMissing '{field_name}'"
+        case x if isinstance(x, str):
+            pass
+        case x:
+            res = False
+            res_text += f"\nWrong type: '{field_name}'. Expected type str, got {type(x)}"
+
+    for field_name in ["period_from", "period_to"]:
+        match self.get(field_name):
+            case None:
+                res = False
+                res_text += f"\nMissing '{field_name}'"
+            case x if isinstance(x, datetime):
+                pass
+            case x:
+                res = False
+                res_text += f"\nWrong type: '{field_name}'. Expected type str, got {type(x)}"
+
+    return res, res_text
+
+class PostgresDeletePeriodRunner(PostgresDeleteRunner):
+    """
+    delete from {pg_table}
+    where 1=1
+        and {field} >= {period_start}
+        and {field} <  {period_end}
+    """
+
+    def __init__(
+        self,
+        inner: PostgresDeletePeriodModel | str,
+    ):
+        if inner is None:
+            raise RuntimeError("PostgresDeletePeriodModel is None. Make sure it passed to the function correctly")
+        
+        # model может быть только str (так как jinja template), либо Dict
+        if not isinstance(inner, str) and inner is not Dict:
+            raise RuntimeError(f"""Invalid PostgresDeletePeriodModel value
+Invalid type was passed: {type(inner)}
+{inner}
+
+Possible values:
+- Jinja template -> Dict
+- Dict""")
+
+        self.inner = inner
+
+    @staticmethod
+    def render_template(val, context):
+            task = context["task"]
+            jinja_env = task.get_template_env()
+            val = task.render_template(
+                val,
+                context,
+                jinja_env,
+                set(),
+            )
+            return val
+    
+    def execute(self,
+        context,
+        cursor,
+        schema,
+        table,
+    ):
+        log = logging.getLogger(self.__class__.__name__)
+        log.info("removal strategy: delete period")
+
+        # нужно отрендерить модель через Jinja
+        inner = PostgresDeletePeriodRunner.render_template(self.inner, context)
+        if inner is None:
+            raise RuntimeError("PostgresDeletePeriodModel is None. Make sure it passed to the function correctly")
+        
+        # model может быть только Dict
+        if not isinstance(inner, Dict):
+            raise RuntimeError(f"""Invalid PostgresDeletePeriodModel value
+Invalid type was passed: {type(inner)}
+{inner}
+
+Possible values:
+- Jinja template -> Dict
+- Dict""")
+        
+        inner: PostgresDeletePeriodModel = PostgresDeletePeriodModel(**inner)
+
+        # эх, в python 3.11 появится нормальная валидация на основе TypedDict, а пока делаю самостоятельно
+        res = validate_delete_period_model(inner)
+        if res[0] is False:
+            raise RuntimeError("Error validation PostgresDeletePeriodModel:{}\npassed value: {}".format(res[1], inner))
+
+        pg_man = PostgresManipulator(log)
+        pg_man.pg_delete_range_from_table(
+            cursor,
+            schema,
+            table,
+            inner['field'],
+            inner['period_from'],
+            inner['period_to'],
+        )
+
+def pg_to_pg_period_reload(
+    src_schema: str,
+    src_table: str,
+    tgt_schema: str,
+    tgt_table: str,
+    tgt_delete: PostgresDeletePeriodModel | str,
+    src_table_check: bool = True,
+    schema_strategy: Union[
+        PostgresToPostgresSchemaStrategy, str
+    ] = PostgresToPostgresSchemaStrategy("create_table_if_not_exists"),
+    rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+    override_schema: Optional[Union[str, Dict[str, str]]] = None,
+    override_columns: Optional[
+        Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
+    ] = None,
+    exclude_columns: Optional[Union[str, List[str]]] = None,
+    create_table_template: str = "create table {pg_table} ({pg_columns})",
+    src_cur_key: Optional[str] = None,
+    tgt_cur_key: Optional[str] = None,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresToPostgresSchemaSyncModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
+                tgt_schema,
+                tgt_table,
+                src_table_check,
+                schema_strategy,
+                rename_columns,
+                override_schema,
+                exclude_columns,
+                create_table_template,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresToPostgresDataReloadModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
+                tgt_schema,
+                tgt_table,
+                PostgresDeletePeriodRunner(tgt_delete),
                 rename_columns,
                 override_columns,
                 exclude_columns,

@@ -1,0 +1,362 @@
+from typing import (
+    Any,
+    Callable,
+    List,
+    Optional,
+    Dict,
+    Sequence,
+    Tuple,
+    Union,
+)
+import itertools
+import logging
+from functools import total_ordering
+from contextlib import closing, ExitStack
+
+import psycopg2.extras
+import psycopg2.sql
+
+from airflow.models.baseoperator import BaseOperator
+
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.providers.gun.pg import PostgresCopyExpertToPostgres
+from airflow.providers.gun.pipe import (
+    PipeStage,
+    PipeTask,
+    PipeTaskBuilder,
+)
+from airflow.providers.gun.sync.pg_to_pg_common import (
+    pg_type_stmp_text,
+    PostgresManipulator,
+)
+from airflow.providers.gun.sync.pg_to_pg_schema_sync import (
+    PostgresToPostgresSchemaStrategy,
+    PostgresToPostgresSchemaSyncModule,
+)
+
+from airflow.providers.gun.sync.pg_to_pg_data_full_reload import PostgresToPostgresFullReload, PostgresToPostgresFullReloadOverrideColumn
+
+
+class PostgresToPostgresDeltaReload(PostgresToPostgresFullReload):
+    def __init__(
+        self,
+        logger,
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema: str,
+        src_table: str,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_schema: str,
+        tgt_table: str,
+        rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+        override_columns: Optional[
+            Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
+        ] = None,
+        exclude_columns: Optional[Union[str, List[str]]] = None,
+    ) -> None:
+        super().__init__(
+            logger,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            rename_columns,
+            override_columns,
+            exclude_columns,
+        )
+
+    def execute(self, context):
+        src_cursor = self.src_cursor
+        tgt_cursor = self.tgt_cursor
+
+        (
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            rule_columns,
+        ) = self.clean_validate_and_flatten_params(
+            self.src_schema,
+            self.src_table,
+            self.tgt_schema,
+            self.tgt_table,
+            self.rename_columns,
+            self.override_columns,
+            self.exclude_columns,
+        )
+
+        self.sync_data(
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            rule_columns,
+            context,
+        )
+
+    def sync_data(
+        self,
+        select_cursor: psycopg2.extensions.cursor,
+        select_schema: str,
+        select_table: str,
+        insert_cursor: psycopg2.extensions.cursor,
+        insert_schema: str,
+        insert_table: str,
+        rule_columns: List[PostgresToPostgresFullReloadOverrideColumn],
+        context,
+    ):
+        self.log.info(
+            f"Delta reload {select_schema}.{select_table} -> {insert_schema}.{insert_table}"
+        )
+        self.log.info(f"pg src: {select_cursor.connection.dsn}")
+        self.log.info(f"pg tgt: {insert_cursor.connection.dsn}")
+
+        union_columns = self.make_fields_info(
+            select_cursor,
+            select_schema,
+            select_table,
+            insert_cursor,
+            insert_schema,
+            insert_table,
+            rule_columns,
+        )
+
+        self.log.info("matching rules:")
+        for rule in union_columns:
+            self.log.info(f"{rule}")
+
+        columns = sorted(union_columns)
+
+        select_alias = "s"
+        select_fields = map(
+            lambda column: column.select_field(select_alias, select_cursor), columns.copy()
+        )
+        select_fields = [x for x in select_fields if x is not None]
+
+        select_params = map(
+            lambda column: column.select_param(select_cursor), columns.copy()
+        )
+        select_params = [x for x in select_params if x is not None]
+
+        insert_fields = map(
+            lambda column: column.insert_field(insert_cursor), columns.copy()
+        )
+        insert_fields = [x for x in insert_fields if x is not None]
+
+        # предварительная отчистка таблицы назначения
+        self.pg_man.pg_truncate_table(
+            insert_cursor,
+            insert_schema,
+            insert_table,
+        )
+        
+        # здесь я пытаюсь обойти ограничение которое было заложено в предыдущий раз
+        # весь класс ориентировался на то, что будет работать с одним postgres курсором
+        # все запросы должны были выполняться в одном подключении, соответственно
+        # переливка данных из одной таблицы в другую должна осуществляться простым insert .. select .. запросом
+        # но так как сейчас возникла необходимость реализовать переливку данных между двумя postgres используя разные подключения
+        # здесь я сравниваю два курсора на условие "это один и тот же объект?"
+        # если да, то выполняю перезаливку данных как раньше, в один запрос
+        # если нет, то выполняю перезаливку данных через запуск команды copy на двух разных курсорах
+        if select_cursor is insert_cursor:
+            # обрати внимание, что используется только select_cursor
+            # так как insert_cursor это тот же самый объект, что и select_cursor
+            query_stmp = self.pg_man.pg_insert_select_in_one_postgres(
+                select_cursor,
+                insert_schema,
+                insert_table,
+                insert_fields,
+                select_schema,
+                select_table,
+                select_fields,
+                select_alias,
+            )
+
+            select_cursor.execute(query_stmp, select_params)
+            self.log.info(f"pg copy success: {select_cursor.rowcount} rows")
+            context["target_row"] = select_cursor.rowcount
+            select_cursor.connection.commit()
+        else:
+            # обрати внимание, что используется оба курсора select_cursor и insert_cursor
+            copy_from_stmp, copy_to_stmp = self.pg_man.pg_insert_select_between_two_postgres(
+                insert_cursor,
+                insert_schema,
+                insert_table,
+                insert_fields,
+                select_cursor,
+                select_schema,
+                select_table,
+                select_fields,
+                select_alias,
+            )
+
+            PostgresCopyExpertToPostgres.execute(
+                src_cursor=select_cursor,
+                src_query=copy_from_stmp,
+                src_params=select_params,
+                tgt_cursor=insert_cursor,
+                tgt_query=copy_to_stmp,
+                tgt_params=None,
+            )
+
+            self.log.info(f"pg copy success: {insert_cursor.rowcount} rows")
+            context["target_row"] = insert_cursor.rowcount
+            insert_cursor.connection.commit()
+
+
+class PostgresToPostgresDeltaReloadModule(PipeTask):
+    def __init__(
+        self,
+        context_key: str,
+        template_render: Callable,
+        src_cur_key: Optional[str],
+        src_schema: str,
+        src_table: str,
+        tgt_cur_key: Optional[str],
+        tgt_schema: str,
+        tgt_table: str,
+        rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+        override_columns: Optional[
+            Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
+        ] = None,
+        exclude_columns: Optional[Union[str, List[str]]] = None,
+    ):
+        super().__init__(context_key)
+        super().set_template_fields(
+            (
+                "src_cur_key",
+                "src_schema",
+                "src_table",
+                "tgt_cur_key",
+                "tgt_schema",
+                "tgt_table",
+                "rename_columns",
+                "override_columns",
+                "exclude_columns",
+            )
+        )
+        super().set_template_render(template_render)
+
+        if src_cur_key:
+            self.src_cur_key = src_cur_key
+        else:
+            self.src_cur_key = "pg_cur"
+
+        if tgt_cur_key:
+            self.tgt_cur_key = tgt_cur_key
+        else:
+            self.tgt_cur_key = "pg_cur"
+
+        self.src_schema = src_schema
+        self.src_table = src_table
+        self.tgt_schema = tgt_schema
+        self.tgt_table = tgt_table
+        self.rename_columns = rename_columns
+        self.override_columns = override_columns
+        self.exclude_columns = exclude_columns
+
+    def __call__(self, context):
+        self.render_template_fields(context)
+
+        match context[self.context_key].get(self.src_cur_key):
+            case None:
+                raise RuntimeError(
+                    """Could not find src postgres cursor (postgres connection)
+Before using module, you need to define postgres connection.
+This can be done via 'pg_auth_airflow_conn'"""
+                )
+            case src_cursor:
+                src_cursor: psycopg2.extensions.cursor = src_cursor
+        
+        match context[self.context_key].get(self.tgt_cur_key):
+            case None:
+                raise RuntimeError(
+                    """Could not find tgt postgres cursor (postgres connection)
+Before using module, you need to define postgres connection.
+This can be done via 'pg_auth_airflow_conn'"""
+                )
+            case tgt_cursor:
+                tgt_cursor: psycopg2.extensions.cursor = tgt_cursor
+
+        log = logging.getLogger(self.__class__.__name__)
+
+        base_module = PostgresToPostgresDeltaReload(
+            log,
+            src_cursor,
+            self.src_schema,
+            self.src_table,
+            tgt_cursor,
+            self.tgt_schema,
+            self.tgt_table,
+            self.rename_columns,
+            self.override_columns,
+            self.exclude_columns,
+        )
+
+        base_module.execute(context)
+
+
+def pg_to_pg_delta_reload(
+    src_schema: str,
+    src_table: str,
+    tgt_schema: str,
+    tgt_table: str,
+    src_table_check: bool = True,
+    schema_strategy: Union[
+        PostgresToPostgresSchemaStrategy, str
+    ] = PostgresToPostgresSchemaStrategy("create_table_if_not_exists"),
+    rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+    override_schema: Optional[Union[str, Dict[str, str]]] = None,
+    override_columns: Optional[
+        Union[str, Dict[str, Union[Any, Tuple[Any, str]]]]
+    ] = None,
+    exclude_columns: Optional[Union[str, List[str]]] = None,
+    create_table_template: str = "create table {pg_table} ({pg_columns})",
+    src_cur_key: Optional[str] = None,
+    tgt_cur_key: Optional[str] = None,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresToPostgresSchemaSyncModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
+                tgt_schema,
+                tgt_table,
+                src_table_check,
+                schema_strategy,
+                rename_columns,
+                override_schema,
+                exclude_columns,
+                create_table_template,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresToPostgresDeltaReloadModule(
+                builder.context_key,
+                builder.template_render,
+                src_cur_key,
+                src_schema,
+                src_table,
+                tgt_cur_key,
+                tgt_schema,
+                tgt_table,
+                rename_columns,
+                override_columns,
+                exclude_columns,
+            ),
+            pipe_stage,
+        )
+
+        return builder
+
+    return wrapper
