@@ -1,13 +1,10 @@
-import pendulum
 import pprint
 import json
 import logging
-from typing import Optional, Union, Callable, Any, Iterable
-from datetime import datetime
+from typing import Optional, Callable, Any, Iterable, Sequence, Mapping
 
 from airflow.providers.gun.pipe import PipeTask, PipeTaskBuilder, PipeStage
 
-from airflow.decorators import task, dag, task_group
 from airflow.models.taskinstance import TaskInstance
 from airflow.utils.xcom import XCOM_RETURN_KEY
 
@@ -176,7 +173,10 @@ class PrintComplexObject:
 
     def __call__(self, logger: logging.Logger):
         match self.complex_object:
-            case res if isinstance(res, dict):
+            case res if isinstance(res, Mapping):
+                res = json.dumps(res, indent=5, ensure_ascii=False, default=str)
+                logger.info(res)
+            case res if isinstance(res, Sequence):
                 res = json.dumps(res, indent=5, ensure_ascii=False, default=str)
                 logger.info(res)
             case None:
@@ -420,8 +420,7 @@ def cx_print_xcom(
 
 if __name__ == "__main__":
     from pathlib import Path
-    from airflow.models.dag import DAG
-    from airflow.decorators import task, dag, task_group
+    from airflow.decorators import task, dag
 
     from airflow.providers.gun.pipe import pipe
 

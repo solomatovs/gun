@@ -3494,7 +3494,7 @@ def pg_register_default_json(
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
-    Добавляет поддержку hstore хранения
+    Добавляет поддержку json хранения
     """
 
     def wrapper(builder: PipeTaskBuilder):
@@ -3522,7 +3522,7 @@ def pg_register_default_jsonb(
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
-    Добавляет поддержку hstore хранения
+    Добавляет поддержку jsonb хранения
     """
 
     def wrapper(builder: PipeTaskBuilder):

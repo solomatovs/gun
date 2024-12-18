@@ -20,7 +20,7 @@ class ShiftPeriodGeneratorModel:
         self._period_from = period_from
         self._period_to = period_to
 
-    def from_point(self, time_point: Union[datetime, pendulum.DateTime]):
+    def from_time(self, time_point: Union[datetime, pendulum.DateTime]):
         period_from, period_to = self.gen.from_time(time_point)
         self._period_from = period_from
         self._period_to = period_to
@@ -115,13 +115,13 @@ class ShiftPeriodGeneratorModule(PipeTask):
         timezone,
         start_of,
         end_of,
-        from_point,
+        from_time,
         save_to: str = save_to_default,
     ):
         super().__init__(context_key)
         super().set_template_fields(
             (
-                "shift", "period", "timezone", "start_of", "end_of", "from_point"
+                "shift", "period", "timezone", "start_of", "end_of", "from_time"
             )
         )
         super().set_template_render(template_render)
@@ -132,7 +132,7 @@ class ShiftPeriodGeneratorModule(PipeTask):
         self.timezone = timezone
         self.start_of = start_of
         self.end_of = end_of
-        self.from_point = from_point
+        self.from_time = from_time
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -144,7 +144,7 @@ class ShiftPeriodGeneratorModule(PipeTask):
             self.timezone,
             self.start_of,
             self.end_of,
-            self.from_point,
+            self.from_time,
         )
         gen = ShiftPeriodGeneratorModel(gen)
 
@@ -157,7 +157,7 @@ def period_generator(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[Union[str, datetime, pendulum.DateTime]] = 'now',
+    from_time: Optional[Union[str, datetime, pendulum.DateTime]] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -165,7 +165,7 @@ def period_generator(
     Генерирует период на основе переданных параметров
     
     Args:
-        shift: Сдвиг в {period} от текущей даты или даты переданной в from_point
+        shift: Сдвиг в {period} от текущей даты или даты переданной в from_time
         period: Период, на который нужно сдвинуть дату
         timezone: Часовой пояс
         start_of: Указание на смещение левой границы периода
@@ -282,7 +282,7 @@ def period_generator(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -308,7 +308,7 @@ def period_this_minute(
                 timezone=timezone,
                 start_of='minute',
                 end_of='next_minute',
-                from_point='now',
+                from_time='now',
                 save_to=save_to,
             ),
             pipe_stage,
@@ -321,7 +321,7 @@ def period_this_minute(
 
 def period_prev_minute(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -335,7 +335,7 @@ def period_prev_minute(
                 timezone=timezone,
                 start_of='minute',
                 end_of='minute',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -348,7 +348,7 @@ def period_prev_minute(
 def period_prev_minutes(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -362,7 +362,7 @@ def period_prev_minutes(
                 timezone=timezone,
                 start_of='minute',
                 end_of='minute',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -377,7 +377,7 @@ def period_last_minute(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -391,7 +391,7 @@ def period_last_minute(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -406,7 +406,7 @@ def period_last_minutes(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -420,7 +420,7 @@ def period_last_minutes(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -432,7 +432,7 @@ def period_last_minutes(
 
 def period_this_hour(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -446,7 +446,7 @@ def period_this_hour(
                 timezone=timezone,
                 start_of='hour',
                 end_of='next_hour',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -459,7 +459,7 @@ def period_this_hour(
 
 def period_prev_hour(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -473,7 +473,7 @@ def period_prev_hour(
                 timezone=timezone,
                 start_of='hour',
                 end_of='hour',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -486,7 +486,7 @@ def period_prev_hour(
 def period_prev_hours(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -500,7 +500,7 @@ def period_prev_hours(
                 timezone=timezone,
                 start_of='hour',
                 end_of='hour',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -515,7 +515,7 @@ def period_last_hour(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -529,7 +529,7 @@ def period_last_hour(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -544,7 +544,7 @@ def period_last_hours(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -558,7 +558,7 @@ def period_last_hours(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -570,7 +570,7 @@ def period_last_hours(
 
 def period_this_day(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -584,7 +584,7 @@ def period_this_day(
                 timezone=timezone,
                 start_of='day',
                 end_of='next_day',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -596,7 +596,7 @@ def period_this_day(
 
 def period_prev_day(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -610,7 +610,7 @@ def period_prev_day(
                 timezone=timezone,
                 start_of='hour',
                 end_of='day',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -623,7 +623,7 @@ def period_prev_day(
 def period_prev_days(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -637,7 +637,7 @@ def period_prev_days(
                 timezone=timezone,
                 start_of='day',
                 end_of='day',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -651,7 +651,7 @@ def period_last_day(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -665,7 +665,7 @@ def period_last_day(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -680,7 +680,7 @@ def period_last_days(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -694,7 +694,7 @@ def period_last_days(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -706,7 +706,7 @@ def period_last_days(
 
 def period_this_week(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -720,7 +720,7 @@ def period_this_week(
                 timezone=timezone,
                 start_of='week',
                 end_of='next_week',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -732,7 +732,7 @@ def period_this_week(
 
 def period_prev_week(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -746,7 +746,7 @@ def period_prev_week(
                 timezone=timezone,
                 start_of='week',
                 end_of='week',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -760,7 +760,7 @@ def period_prev_week(
 def period_prev_weeks(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -774,7 +774,7 @@ def period_prev_weeks(
                 timezone=timezone,
                 start_of='week',
                 end_of='week',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -788,7 +788,7 @@ def period_last_week(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -802,7 +802,7 @@ def period_last_week(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -817,7 +817,7 @@ def period_last_weeks(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -831,7 +831,7 @@ def period_last_weeks(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -843,7 +843,7 @@ def period_last_weeks(
 
 def period_this_month(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -857,7 +857,7 @@ def period_this_month(
                 timezone=timezone,
                 start_of='month',
                 end_of='next_month',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -869,7 +869,7 @@ def period_this_month(
 
 def period_prev_month(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -883,7 +883,7 @@ def period_prev_month(
                 timezone=timezone,
                 start_of='month',
                 end_of='month',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -896,7 +896,7 @@ def period_prev_month(
 def period_prev_months(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -910,7 +910,7 @@ def period_prev_months(
                 timezone=timezone,
                 start_of='month',
                 end_of='month',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -925,7 +925,7 @@ def period_last_month(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -939,7 +939,7 @@ def period_last_month(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -954,7 +954,7 @@ def period_last_months(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -968,7 +968,7 @@ def period_last_months(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -981,7 +981,7 @@ def period_last_months(
 
 def period_this_year(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -995,7 +995,7 @@ def period_this_year(
                 timezone=timezone,
                 start_of='year',
                 end_of='next_year',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -1008,7 +1008,7 @@ def period_this_year(
 
 def period_prev_year(
     timezone: str = 'Europe/Moscow',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1022,7 +1022,7 @@ def period_prev_year(
                 timezone=timezone,
                 start_of='year',
                 end_of='year',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -1035,7 +1035,7 @@ def period_prev_year(
 def period_prev_years(
     timezone: str = 'Europe/Moscow',
     shift: int | str = -1,
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1049,7 +1049,7 @@ def period_prev_years(
                 timezone=timezone,
                 start_of='year',
                 end_of='year',
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -1064,7 +1064,7 @@ def period_last_year(
     timezone: str = 'Europe/Moscow',
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1078,7 +1078,7 @@ def period_last_year(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
@@ -1093,7 +1093,7 @@ def period_last_years(
     shift: int | str = -1,
     start_of: str = 'cur',
     end_of: str = 'cur',
-    from_point: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1107,7 +1107,7 @@ def period_last_years(
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
-                from_point=from_point,
+                from_time=from_time,
                 save_to=save_to,
             ),
             pipe_stage,
