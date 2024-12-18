@@ -11,11 +11,13 @@ from airflow.decorators import task, dag, task_group
 from airflow.models.taskinstance import TaskInstance
 from airflow.utils.xcom import XCOM_RETURN_KEY
 
+
 __all__ = [
     "cx_save",
     "cx_save_from_xcom",
     "cx_print",
     "cx_print_result",
+    "cx_print_xcom",
     "cx_render_result",
 ]
 

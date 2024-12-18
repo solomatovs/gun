@@ -49,9 +49,11 @@ period_to:   {self.period_to_str}
 --------"""
     
     def __repr__(self):
-        return f"""ShiftPeriodGeneratorModel(gen={repr(self.gen)},
-    period_from='{self.period_from_str}',
-    period_to='{self.period_to_str}')"""
+        return f"""ShiftPeriodGeneratorModel(
+    gen         = {repr(self.gen)},
+    period_from = '{self.period_from_str}',
+    period_to   = '{self.period_to_str}'
+)"""
 
 class PrintPeriodGeneratorModule(PipeTask):
     def __init__(
