@@ -13,6 +13,7 @@ from airflow.providers.gun.sync.pg_to_pg_data_reload import (
     pg_full_reload,
     pg_to_pg_full_reload,
     pg_to_pg_period_reload,
+    pg_to_pg_data_sync,
     PostgresToPostgresFullReloadOperator,
 )
 
@@ -28,4 +29,5 @@ __all__ = [
     "pg_to_pg_full_reload",
     "pg_to_ch_full_reload",
     "pg_to_pg_period_reload",
+    "pg_to_pg_data_sync",
 ]

@@ -13,22 +13,18 @@ class ShiftPeriodGenerator:
         timezone: str = 'Europe/Moscow',
         start_of: str = 'cur',
         end_of: str = 'cur',
-        from_point: Optional[Union[str, datetime, pendulum.DateTime]] = None,
+        from_time: Optional[Union[str, datetime, pendulum.DateTime]] = None,
     ):
         self._shift, self.period = self._validate_and_normalize_shift_period(shift, period)
         self._timezone = self._validate_and_normalize_timezone(timezone)
         self._start_of = self._validate_and_normalize_of(start_of, 'start_of')
         self._end_of = self._validate_and_normalize_of(end_of, 'end_of')
-        self._from_point = self._validate_from(from_point, self._timezone)
+        self._from_point = self._validate_from(from_time, self._timezone)
 
     def __str__(self):
         period_info = f"{self._shift} {self.period}(s)" if self._shift is not None else "no shift"
         return f"ShiftPeriodGenerator({period_info}, timezone={self._timezone}, start_of={self._start_of}, end_of={self._end_of}, from_point={self._from_point})"
     
-    def __repr__(self):
-        return (f"ShiftPeriodGenerator(shift={self._shift}, period='{self.period}', "
-                f"timezone='{self._timezone}', start_of='{self._start_of}', "
-                f"end_of='{self._end_of}', from_point={repr(self._from_point)})")
     def _validate_from(self, from_point: Optional[Union[str, datetime, pendulum.DateTime]], timezone: str):
         match from_point:
             case None:

@@ -31,17 +31,11 @@ __all__ = [
     "pg_execute",
     "pg_execute_and_commit",
     "pg_execute_and_save_to_context",
-    "pg_execute_and_save_to_context_if_not_empty",
     "pg_execute_and_fetchone_to_context",
-    "pg_execute_and_fetchone_to_context_if_not_empty",
     "pg_execute_and_fetchall_to_context",
-    "pg_execute_and_fetchall_to_context_if_not_empty",
     "pg_execute_and_save_to_xcom",
-    "pg_execute_and_save_to_xcom_if_not_empty",
     "pg_execute_and_fetchone_to_xcom",
-    "pg_execute_and_fetchone_to_xcom_if_not_empty",
     "pg_execute_and_fetchall_to_xcom",
-    "pg_execute_and_fetchall_to_xcom_if_not_empty",
     "pg_execute_file",
     "pg_execute_file_and_commit",
     "pg_fetch_to_stdout",
@@ -69,17 +63,11 @@ __all__ = [
     "pg_register_ipaddress",
     "pg_register_range",
     "pg_save_to_context",
-    "pg_save_to_context_if_not_empty",
     "pg_fetchone_to_context",
-    "pg_fetchone_to_context_if_not_empty",
     "pg_fetchall_to_context",
-    "pg_fetchall_to_context_if_not_empty",
     "pg_save_to_xcom",
-    "pg_save_to_xcom_if_not_empty",
     "pg_fetchone_to_xcom",
-    "pg_fetchone_to_xcom_if_not_empty",
     "pg_fetchall_to_xcom",
-    "pg_fetchall_to_xcom_if_not_empty",
 ]
 
 pg_cur_key_default = "pg_cur"
@@ -2087,7 +2075,7 @@ class PostgresSaveToXComModule(PipeTask):
         template_render: Callable,
         save_to: str,
         save_builder: Callable[[psycopg2.extensions.cursor], Any],
-        save_condition: Callable[[psycopg2.extensions.cursor], bool],
+        save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str,
         jinja_render: bool,
         cur_key: str = pg_cur_key_default,
     ):
@@ -2099,33 +2087,40 @@ class PostgresSaveToXComModule(PipeTask):
         self.ti_key = "ti"
         self.save_to = save_to
         self.save_builder = save_builder
-        self.save_condition = save_condition
+        self.save_if = save_if
         self.jinja_render = jinja_render
 
     def __call__(self, context):
-        self.render_template_fields(context)
         pg_cur = context[self.context_key][self.cur_key]
 
-        run_saving = True
-        if self.save_condition is not None:
-            run_saving = self.save_condition(pg_cur)
-        
-        if not run_saving:
-            return
+        # выполняю проверку нужно ли сохранять результат в контекст
+        self.render_template_fields(context)
 
         res = self.save_builder(pg_cur)
-
         # выполняем рендер jinja, если нужно
-        if self.jinja_render:
+        if self.jinja_render and res is not None:
             res = self.template_render(res, context)
+        
+        if self.save_if_eval(context, res, pg_cur):
+            ti = context[self.ti_key]
+            ti.xcom_push(key=self.save_to, value=res)
 
-        ti = context[self.ti_key]
-        ti.xcom_push(key=self.save_to, value=res)
+    def save_if_eval(self, context, res, pg_cur):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res, pg_cur)
+
+        return save_if
 
 
 def pg_save_to_xcom(
     save_to: str,
     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2154,7 +2149,7 @@ def pg_save_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=save_builder,
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2164,59 +2159,60 @@ def pg_save_to_xcom(
 
     return wrapper
 
-def _save_if_not_empty(pg_cur: psycopg2.extensions.cursor):
+def if_rows_exist(context, res, pg_cur: psycopg2.extensions.cursor):
     # rowcount содержит кол-во строк которые были затронуты в последнем execute запросе
     # логика может быть не совсем верной, например когда выполнен update или delete
     # но это позволяет не начинать чтение из курсора если результат пустой для select
     # в остальных случаях просто не нужно использовать сохранение результата для update и delete операторов
-    if pg_cur.rowcount > 0:
+    if pg_cur.rowcount > 0 and res is not None:
         return True
 
     return False
 
-def pg_save_to_xcom_if_not_empty(
-    save_to: str,
-    save_builder: Callable[[psycopg2.extensions.cursor], Any],
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить результат в xcom, только если результат не пустой (не None, не пустой список, не пустой словарь)
+# def pg_save_to_xcom_if_not_empty(
+#     save_to: str,
+#     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить результат в xcom, только если результат не пустой (не None, не пустой список, не пустой словарь)
     
-    Args:
-        save_to: это имя xcom ключа
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в xcom
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         save_to: это имя xcom ключа
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в xcom
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_to_xcom_if_not_empty("my_context_key", lambda cur: {
-                'target_row': cur.rowcount,
-                'source_row': {{ params.source_row }},
-                'error_row': 0,
-            })
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_to_xcom_if_not_empty("my_context_key", lambda cur: {
+#                 'target_row': cur.rowcount,
+#                 'source_row': {{ params.source_row }},
+#                 'error_row': 0,
+#             })
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):        
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=save_builder,
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):        
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=save_builder,
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_fetchone_to_xcom(
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2240,7 +2236,7 @@ def pg_fetchone_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchone(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2250,43 +2246,44 @@ def pg_fetchone_to_xcom(
 
     return wrapper
 
-def pg_fetchone_to_xcom_if_not_empty(
-    save_to: str,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+# def pg_fetchone_to_xcom_if_not_empty(
+#     save_to: str,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
 
-    Args:
-        save_to: это имя xcom ключа
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         save_to: это имя xcom ключа
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchone(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchone(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_fetchall_to_xcom(
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2310,7 +2307,7 @@ def pg_fetchall_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchall(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2320,45 +2317,46 @@ def pg_fetchall_to_xcom(
 
     return wrapper
 
-def pg_fetchall_to_xcom_if_not_empty(
-    save_to: str,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+# def pg_fetchall_to_xcom_if_not_empty(
+#     save_to: str,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
 
-    Args:
-        save_to: это имя xcom ключа
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         save_to: это имя xcom ключа
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchall(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchall(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_execute_and_save_to_xcom(
     sql: str,
     save_to: str,
     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -2405,7 +2403,7 @@ def pg_execute_and_save_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=save_builder,
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2416,71 +2414,73 @@ def pg_execute_and_save_to_xcom(
     return wrapper
 
 
-def pg_execute_and_save_to_xcom_if_not_empty(
-    sql: str,
-    save_to: str,
-    save_builder: Callable[[psycopg2.extensions.cursor], Any],
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Xcom для последующего использования
-    Если результат запрос возвратит кол-во строк > 0
-    Результат запроса будет получен через fetchall
+# def pg_execute_and_save_to_xcom_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+#     save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Xcom для последующего использования
+#     Если результат запрос возвратит кол-во строк > 0
+#     Результат запроса будет получен через fetchall
 
-    Args:
-        sql: это sql запрос, который будет выполнен
-        save_to: это имя xcom ключа.
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
-        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         sql: это sql запрос, который будет выполнен
+#         save_to: это имя xcom ключа.
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+#         params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_execute_and_save_to_context(
-                sql="select %(date)s", params={"date": pendulum.now()},
-                save_to="my_context_key",
-                save_builder=lambda cur: {
-                    'target_row': cur.rowcount,
-                    'source_row': {{ params.source_row }},
-                    'error_row': 0,
-                },
-            )
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_execute_and_save_to_context(
+#                 sql="select %(date)s", params={"date": pendulum.now()},
+#                 save_to="my_context_key",
+#                 save_builder=lambda cur: {
+#                     'target_row': cur.rowcount,
+#                     'source_row': {{ params.source_row }},
+#                     'error_row': 0,
+#                 },
+#             )
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
         
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=save_builder,
-                save_condition=lambda _: True,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=save_builder,
+#                 save_if=save_if,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_execute_and_fetchone_to_xcom(
     sql: str,
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -2516,7 +2516,7 @@ def pg_execute_and_fetchone_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchone(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2526,57 +2526,58 @@ def pg_execute_and_fetchone_to_xcom(
 
     return wrapper
 
-def pg_execute_and_fetchone_to_xcom_if_not_empty(
-    sql: str,
-    save_to: str,
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+# def pg_execute_and_fetchone_to_xcom_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
 
-    Args:
-        save_to: это имя xcom ключа
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         save_to: это имя xcom ключа
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
 
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchone(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchone(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_execute_and_fetchall_to_xcom(
     sql: str,
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -2612,7 +2613,7 @@ def pg_execute_and_fetchall_to_xcom(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchall(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2622,53 +2623,53 @@ def pg_execute_and_fetchall_to_xcom(
 
     return wrapper
 
-def pg_execute_and_fetchall_to_xcom_if_not_empty(
-    sql: str,
-    save_to: str,
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+# def pg_execute_and_fetchall_to_xcom_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
 
-    Args:
-        save_to: это имя xcom ключа
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         save_to: это имя xcom ключа
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_xcom_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
 
-        builder.add_module(
-            PostgresSaveToXComModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchall(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchall(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 
 class PostgresSaveToContextModule(PipeTask):
@@ -2678,7 +2679,7 @@ class PostgresSaveToContextModule(PipeTask):
         template_render: Callable,
         save_to: str,
         save_builder: Callable[[psycopg2.extensions.cursor], Any],
-        save_condition: Callable[[psycopg2.extensions.cursor], bool],
+        save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str,
         jinja_render: bool,
         cur_key: str = pg_cur_key_default,
     ):
@@ -2690,33 +2691,39 @@ class PostgresSaveToContextModule(PipeTask):
         self.ti_key = "ti"
         self.save_to = save_to
         self.save_builder = save_builder
-        self.save_condition = save_condition
+        self.save_if = save_if
         self.jinja_render = jinja_render
 
     def __call__(self, context):
-        self.render_template_fields(context)
         pg_cur = context[self.context_key][self.cur_key]
 
         # выполняю проверку нужно ли сохранять результат в контекст
-        res_save_condition = True
-        if self.save_condition is not None:
-            res_save_condition = self.save_condition(pg_cur)
-        
-        if not res_save_condition:
-            return
-        
-        res = self.save_builder(pg_cur)
+        self.render_template_fields(context)
 
+        res = self.save_builder(pg_cur)
         # выполняем рендер jinja, если нужно
         if self.jinja_render and res is not None:
             res = self.template_render(res, context)
         
-        context[self.save_to] = res
+        if self.save_if_eval(context, res, pg_cur):
+            context[self.save_to] = res
+
+    def save_if_eval(self, context, res, pg_cur):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res, pg_cur)
+
+        return save_if
 
 
 def pg_save_to_context(
     save_to: str,
     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2726,6 +2733,7 @@ def pg_save_to_context(
     Args:
         save_to: это имя context ключа.
         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        save_if: это функция, которая будет использована для проверки, нужно ли сохранять результат в context
         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
     Examples:
@@ -2744,7 +2752,7 @@ def pg_save_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=save_builder,
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2755,48 +2763,49 @@ def pg_save_to_context(
     return wrapper
 
 
-def pg_save_to_context_if_not_empty(
-    save_to: str,
-    save_builder: Callable[[psycopg2.extensions.cursor], Any],
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
-    Args:
-        save_to: это имя context ключа.
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+# def pg_save_to_context_if_not_empty(
+#     save_to: str,
+#     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+#     Args:
+#         save_to: это имя context ключа.
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_to_context_if_not_empty("my_context_key", lambda cur: {
-                'target_row': cur.rowcount,
-                'source_row': {{ params.source_row }},
-                'error_row': 0,
-            })
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_to_context_if_not_empty("my_context_key", lambda cur: {
+#                 'target_row': cur.rowcount,
+#                 'source_row': {{ params.source_row }},
+#                 'error_row': 0,
+#             })
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=save_builder,
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=save_builder,
+#                 save_if=_save_if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_fetchone_to_context(
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2819,7 +2828,7 @@ def pg_fetchone_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchone(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2829,41 +2838,42 @@ def pg_fetchone_to_context(
 
     return wrapper
 
-def pg_fetchone_to_context_if_not_empty(
-    save_to: str,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
-    Args:
-        save_to: это имя context ключа.
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+# def pg_fetchone_to_context_if_not_empty(
+#     save_to: str,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+#     Args:
+#         save_to: это имя context ключа.
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_context_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_context_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchone(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchone(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 def pg_fetchall_to_context(
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -2886,7 +2896,7 @@ def pg_fetchall_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchall(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2896,44 +2906,45 @@ def pg_fetchall_to_context(
 
     return wrapper
 
-def pg_fetchall_to_context_if_not_empty(
-    save_to: str,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
-    Args:
-        save_to: это имя context ключа.
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+# def pg_fetchall_to_context_if_not_empty(
+#     save_to: str,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+#     Args:
+#         save_to: это имя context ключа.
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_context_if_not_empty("my_context_key")
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_save_result_to_context_if_not_empty("my_context_key")
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchall(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchall(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_execute_and_save_to_context(
     sql: str,
     save_to: str,
     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -2980,7 +2991,7 @@ def pg_execute_and_save_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=save_builder,
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -2990,69 +3001,70 @@ def pg_execute_and_save_to_context(
 
     return wrapper
 
-def pg_execute_and_save_to_context_if_not_empty(
-    sql: str,
-    save_to: str,
-    save_builder: Callable[[psycopg2.extensions.cursor], Any],
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+# def pg_execute_and_save_to_context_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     save_builder: Callable[[psycopg2.extensions.cursor], Any],
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
 
-    Args:
-        sql: это sql запрос, который будет выполнен
-        save_to: это имя context ключа.
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
-        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         sql: это sql запрос, который будет выполнен
+#         save_to: это имя context ключа.
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+#         params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_execute_and_save_to_context_if_not_empty(
-                sql="select %(date)s", params={"date": pendulum.now().date()},
-                save_to="my_context_key",
-                save_builder=lambda cur: {
-                    'target_row': cur.rowcount,
-                    'source_row': {{ params.source_row }},
-                    'error_row': 0,
-                },
-            )
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_execute_and_save_to_context_if_not_empty(
+#                 sql="select %(date)s", params={"date": pendulum.now().date()},
+#                 save_to="my_context_key",
+#                 save_builder=lambda cur: {
+#                     'target_row': cur.rowcount,
+#                     'source_row': {{ params.source_row }},
+#                     'error_row': 0,
+#                 },
+#             )
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
 
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=save_builder,
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=save_builder,
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 def pg_execute_and_fetchone_to_context(
     sql: str,
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -3099,7 +3111,7 @@ def pg_execute_and_fetchone_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchone(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -3109,67 +3121,68 @@ def pg_execute_and_fetchone_to_context(
 
     return wrapper
 
-def pg_execute_and_fetchone_to_context_if_not_empty(
-    sql: str,
-    save_to: str,
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+# def pg_execute_and_fetchone_to_context_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
 
-    Args:
-        sql: это sql запрос, который будет выполнен
-        save_to: это имя context ключа.
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
-        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         sql: это sql запрос, который будет выполнен
+#         save_to: это имя context ключа.
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+#         params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_execute_and_save_to_context_if_not_empty(
-                sql="select %(date)s", params={"date": pendulum.now().date()},
-                save_to="my_context_key",
-                save_builder=lambda cur: {
-                    'target_row': cur.rowcount,
-                    'source_row': {{ params.source_row }},
-                    'error_row': 0,
-                },
-            )
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_execute_and_save_to_context_if_not_empty(
+#                 sql="select %(date)s", params={"date": pendulum.now().date()},
+#                 save_to="my_context_key",
+#                 save_builder=lambda cur: {
+#                     'target_row': cur.rowcount,
+#                     'source_row': {{ params.source_row }},
+#                     'error_row': 0,
+#                 },
+#             )
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
 
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchone(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchone(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 def pg_execute_and_fetchall_to_context(
     sql: str,
     save_to: str,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
     params: Optional[Any] = None,
     jinja_render: bool = True,
     cur_key: str = pg_cur_key_default,
@@ -3216,7 +3229,7 @@ def pg_execute_and_fetchall_to_context(
                 builder.template_render,
                 save_to=save_to,
                 save_builder=lambda cur: cur.fetchall(),
-                save_condition=lambda _: True,
+                save_if=save_if,
                 jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
@@ -3226,64 +3239,64 @@ def pg_execute_and_fetchall_to_context(
 
     return wrapper
 
-def pg_execute_and_fetchall_to_context_if_not_empty(
-    sql: str,
-    save_to: str,
-    params: Optional[Any] = None,
-    jinja_render: bool = True,
-    cur_key: str = pg_cur_key_default,
-    pipe_stage: Optional[PipeStage] = None,
-):
-    """
-    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+# def pg_execute_and_fetchall_to_context_if_not_empty(
+#     sql: str,
+#     save_to: str,
+#     params: Optional[Any] = None,
+#     jinja_render: bool = True,
+#     cur_key: str = pg_cur_key_default,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
 
-    Args:
-        sql: это sql запрос, который будет выполнен
-        save_to: это имя context ключа.
-        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
-        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
-        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+#     Args:
+#         sql: это sql запрос, который будет выполнен
+#         save_to: это имя context ключа.
+#         save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+#         params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+#         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    Examples:
-        Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_execute_and_save_to_context_if_not_empty(
-                sql="select %(date)s", params={"date": pendulum.now().date()},
-                save_to="my_context_key",
-                save_builder=lambda cur: {
-                    'target_row': cur.rowcount,
-                    'source_row': {{ params.source_row }},
-                    'error_row': 0,
-                },
-            )
-    """
+#     Examples:
+#         Например можно сохранить кол-во строк, которые вернул postgres:
+#         >>> @pg_execute_and_save_to_context_if_not_empty(
+#                 sql="select %(date)s", params={"date": pendulum.now().date()},
+#                 save_to="my_context_key",
+#                 save_builder=lambda cur: {
+#                     'target_row': cur.rowcount,
+#                     'source_row': {{ params.source_row }},
+#                     'error_row': 0,
+#                 },
+#             )
+#     """
 
-    def wrapper(builder: PipeTaskBuilder):
-        builder.add_module(
-            PostgresExecuteModule(
-                builder.context_key,
-                builder.template_render,
-                sql,
-                params,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             PostgresExecuteModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 sql,
+#                 params,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
 
-        builder.add_module(
-            PostgresSaveToContextModule(
-                builder.context_key,
-                builder.template_render,
-                save_to=save_to,
-                save_builder=lambda cur: cur.fetchall(),
-                save_condition=_save_if_not_empty,
-                jinja_render=jinja_render,
-                cur_key=cur_key,
-            ),
-            pipe_stage,
-        )
-        return builder
+#         builder.add_module(
+#             PostgresSaveToContextModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_builder=lambda cur: cur.fetchall(),
+#                 save_if=if_not_empty,
+#                 jinja_render=jinja_render,
+#                 cur_key=cur_key,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
 
-    return wrapper
+#     return wrapper
 
 class PostgresInsertDictionaryModule(PipeTask):
     def __init__(

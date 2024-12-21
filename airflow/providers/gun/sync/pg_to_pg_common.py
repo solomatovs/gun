@@ -360,6 +360,10 @@ It may be necessary to reduce the tgt type to {src_type}({src_character_maximum_
 
 
 class PostgresManipulator:
+    """Необходим для формирования корректных запросов к postgres
+    Класс только формирует запросы, без выполнения
+    """
+
     def __init__(
         self,
         logger,
@@ -765,7 +769,31 @@ alter table {pg_schema_back}.{pg_table} rename to {pg_table_back};"""
         cursor.execute(stmp)
 
 
-    def pg_delete_range_from_table(
+    def pg_delete_all_from_table(
+        self,
+        cursor: psycopg2.extensions.cursor,
+        schema: str,
+        table: str,
+    ):
+        tmpl = """
+delete from {table_path} as {alias}
+"""
+        del_alias = "d"
+
+        _table_path = self._table_path_exp(cursor, schema, table)
+        _alias = psycopg2.sql.SQL("{}").format(
+            psycopg2.sql.Identifier(del_alias),
+        ).as_string(cursor)
+
+        stmp = tmpl.format(**{
+                "table_path": _table_path,
+                "alias": _alias,
+            }
+        )
+        
+        cursor.execute(stmp)
+
+    def pg_delete_period_from_table(
         self,
         cursor: psycopg2.extensions.cursor,
         schema: str,
@@ -819,6 +847,7 @@ where 1=1
         select_schema: str,
         select_table: str,
         select_fields: Sequence[str],
+        select_where: Optional[str],
         select_alias: str,
     ):
         _insert_table = self._table_path_exp(
@@ -833,6 +862,12 @@ where 1=1
         )
         _insert_fields = ",\n".join(insert_fields)
         _select_fields = ",\n".join(select_fields)
+        if select_where is not None:
+            _select_where = """where 1=1
+{}""".format(select_where)
+        else:
+            _select_where = ""
+
         _select_alias = (
             psycopg2.sql.SQL("{}")
             .format(
@@ -848,12 +883,14 @@ select
 {select_fields}
 from
     {select_table} as {select_alias}
+{select_where}
 """.format(
             **{
                 "insert_table": _insert_table,
                 "insert_fields": _insert_fields,
                 "select_table": _select_table,
                 "select_fields": _select_fields,
+                "select_where": _select_where,
                 "select_alias": _select_alias,
             }
         )
@@ -871,6 +908,7 @@ from
         select_schema: str,
         select_table: str,
         select_fields: Sequence[str],
+        select_where: Optional[str],
         select_alias: str,
     ):
         _insert_table = self._table_path_exp(
@@ -893,6 +931,12 @@ from
             .as_string(select_cursor)
         )
 
+        if select_where is not None:
+            _select_where = """where 1=1
+{}""".format(select_where)
+        else:
+            _select_where = ""
+
         copy_to_stmp = """copy {insert_table} (
 {insert_fields}
 ) from stdin""".format(
@@ -907,12 +951,164 @@ select
 {select_fields}
 from
     {select_table} as {select_alias}
+{select_where}
 ) to stdout""".format(
             **{
                 "select_table": _select_table,
                 "select_fields": _select_fields,
                 "select_alias": _select_alias,
+                "select_where": _select_where,
             }
         )
+
+        return copy_from_stmp, copy_to_stmp
+
+
+    def pg_insert_select_period_in_one_postgres(
+        self,
+        cursor: psycopg2.extensions.cursor,
+        insert_schema: str,
+        insert_table: str,
+        insert_fields: Sequence[str],
+        select_schema: str,
+        select_table: str,
+        select_fields: Sequence[str],
+        select_alias: str,
+        where_field: str,
+        where_period_from: datetime,
+        where_period_to: datetime,
+    ):
+        _insert_table = self._table_path_exp(
+            cursor,
+            insert_schema,
+            insert_table,
+        )
+        _select_table = self._table_path_exp(
+            cursor,
+            select_schema,
+            select_table,
+        )
+        _insert_fields = ",\n".join(insert_fields)
+        _select_fields = ",\n".join(select_fields)
+
+        _select_alias = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+            )
+            .as_string(cursor)
+        )
+        _where_field = (
+            psycopg2.sql.SQL("{}.{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+                psycopg2.sql.Identifier(where_field),
+            )
+            .as_string(cursor)
+        )
+
+
+        stmp = """insert into {insert_table} (
+{insert_fields}
+)
+select
+{select_fields}
+from
+    {select_table} as {select_alias}
+where 1=1
+    and {where_field} >= %(period_from)s
+    and {where_field} <  %(period_to)s
+""".format(
+            **{
+                "insert_table": _insert_table,
+                "insert_fields": _insert_fields,
+                "select_table": _select_table,
+                "select_fields": _select_fields,
+                "select_alias": _select_alias,
+                "where_field": _where_field,
+            }
+        )
+
+        stmp = cursor.mogrify(stmp, {
+            "period_from": where_period_from,
+            "period_to": where_period_to,
+        }).decode(encoding='utf-8', errors='strict')
+
+        return stmp
+
+
+    def pg_insert_select_period_between_two_postgres(
+        self,
+        insert_cursor: psycopg2.extensions.cursor,
+        insert_schema: str,
+        insert_table: str,
+        insert_fields: Sequence[str],
+        select_cursor: psycopg2.extensions.cursor,
+        select_schema: str,
+        select_table: str,
+        select_fields: Sequence[str],
+        select_alias: str,
+        where_field: str,
+        where_period_from: datetime,
+        where_period_to: datetime,
+    ):
+        _insert_table = self._table_path_exp(
+            insert_cursor,
+            insert_schema,
+            insert_table,
+        )
+        _select_table = self._table_path_exp(
+            select_cursor,
+            select_schema,
+            select_table,
+        )
+        _insert_fields = ",\n".join(insert_fields)
+        _select_fields = ",\n".join(select_fields)
+        _select_alias = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+            )
+            .as_string(select_cursor)
+        )
+        _where_field = (
+            psycopg2.sql.SQL("{}.{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+                psycopg2.sql.Identifier(where_field),
+            )
+            .as_string(select_cursor)
+        )
+
+        copy_to_stmp = """copy {insert_table} (
+{insert_fields}
+) from stdin""".format(
+            **{
+                "insert_table": _insert_table,
+                "insert_fields": _insert_fields,
+            }
+        )
+
+        copy_from_stmp = """copy (
+select
+{select_fields}
+from
+    {select_table} as {select_alias}
+where 1=1
+    and {where_field} >= %(period_from)s
+    and {where_field} <  %(period_to)s
+) to stdout""".format(
+            **{
+                "select_table": _select_table,
+                "select_fields": _select_fields,
+                "select_alias": _select_alias,
+                "where_field": _where_field,
+            }
+        )
+
+        copy_from_stmp = select_cursor.mogrify(copy_from_stmp, {
+            "period_from": where_period_from,
+            "period_to": where_period_to,
+        }).decode(encoding='utf-8', errors='strict')
 
         return copy_from_stmp, copy_to_stmp

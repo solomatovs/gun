@@ -1,6 +1,7 @@
-import pprint
 import json
 import logging
+from jinja2.runtime import StrictUndefined
+
 from typing import Optional, Callable, Any, Iterable, Sequence, Mapping
 
 from airflow.providers.gun.pipe import PipeTask, PipeTaskBuilder, PipeStage
@@ -12,19 +13,21 @@ from airflow.utils.xcom import XCOM_RETURN_KEY
 __all__ = [
     "cx_save",
     "cx_save_from_xcom",
+    "cx_save_to_xcom",
     "cx_print",
     "cx_print_result",
     "cx_print_xcom",
     "cx_render_result",
 ]
 
-class ContextSaveObjectModule(PipeTask):
+class ContextSaveModule(PipeTask):
     def __init__(
         self,
         context_key: str,
         template_render: Callable,
         save_to: str,
         save_object: Any,
+        save_if: Callable[[Any, Any], bool] | bool | str,
         jinja_render: bool,
     ):
         super().__init__(context_key)
@@ -34,6 +37,7 @@ class ContextSaveObjectModule(PipeTask):
         self.ti_key = "ti"
         self.save_to = save_to
         self.save_object = save_object
+        self.save_if = save_if
         self.jinja_render = jinja_render
 
     def __call__(self, context):
@@ -44,12 +48,25 @@ class ContextSaveObjectModule(PipeTask):
         else:
             res = self.save_object
         
-        context[self.save_to] = res
+        if self.save_if_eval(context, res):
+            context[self.save_to] = res
+    
+    def save_if_eval(self, context, res):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
 
 
 def cx_save(
     save_to: str,
     save_object: Any,
+    save_if: Callable[[Any, Any], bool] | bool | str = True,
     jinja_render: bool = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -76,11 +93,12 @@ def cx_save(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ContextSaveObjectModule(
+            ContextSaveModule(
                 builder.context_key,
                 builder.template_render,
                 save_to=save_to,
                 save_object=save_object,
+                save_if=save_if,
                 jinja_render=jinja_render,
             ),
             pipe_stage,
@@ -89,13 +107,64 @@ def cx_save(
 
     return wrapper
 
+def not_none_or_undifined(context, res):
+    if res is None:
+        return False
 
-class ContextSaveObjectFromXcomModule(PipeTask):
+    if isinstance(res, StrictUndefined):
+        return False
+    
+    return True
+
+# def cx_save_if_not_empty(
+#     save_to: str,
+#     save_object: Any,
+#     jinja_render: bool = True,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить любую информацию в Airflow Context 
+#     В случае если объект не None или undefined
+
+#     Args:
+#         save_to: это имя ключа внутри Airflow Context, в которое будет сохранена информация
+#         save_object: это объект, который будет сохранён в Airflow Context
+#         save_if: это функция, которая будет вызвана с результатом выполнения save_object
+#         jinja_render: если True, то объект будет предварительно обработан через jinja
+
+#     Examples:
+#         сохраним в context["my_key"] результат выполнения функции, которая возвращает словарь:
+#         >>> @task()
+#             @cx_save_if_not_empty("my_key", "{{ params.target_row }}")
+#             @pipe(pipe_stage=PipeStage.After)
+#              def my_task():
+#                 pass
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextSaveModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 save_object=save_object,
+#                 save_if=not_none_or_undifined,
+#                 jinja_render=jinja_render,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
+
+
+class ContextSaveFromXcomModule(PipeTask):
     def __init__(
         self,
         context_key: str,
         template_render: Callable,
         save_to: str,
+        save_if: Callable[[Any, Any], bool] | bool | str,
         task_ids: str | Iterable[str],
         xcom_key: str,
         jinja_render: bool,
@@ -109,6 +178,7 @@ class ContextSaveObjectFromXcomModule(PipeTask):
         self.task_ids = task_ids
         self.xcom_key = xcom_key
         self.jinja_render = jinja_render
+        self.save_if = save_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -119,13 +189,26 @@ class ContextSaveObjectFromXcomModule(PipeTask):
         if self.jinja_render:
             res = self.template_render(res, context)
 
-        context[self.save_to] = res
+        if self.save_if_eval(context, res):
+            context[self.save_to] = res
+
+    def save_if_eval(self, context, res):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
 
 
 def cx_save_from_xcom(
     save_to: str,
     task_ids: str | Iterable[str],
     xcom_key: str = XCOM_RETURN_KEY,
+    save_if: Callable[[Any, Any], bool] | bool | str = True,
     jinja_render: bool = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -149,19 +232,180 @@ def cx_save_from_xcom(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ContextSaveObjectFromXcomModule(
+            ContextSaveFromXcomModule(
                 builder.context_key,
                 builder.template_render,
                 save_to=save_to,
                 task_ids=task_ids,
                 xcom_key=xcom_key,
                 jinja_render=jinja_render,
+                save_if=save_if,
             ),
             pipe_stage,
         )
         return builder
 
     return wrapper
+
+# def cx_save_from_xcom_if_not_empty(
+#     save_to: str,
+#     task_ids: str | Iterable[str],
+#     xcom_key: str = XCOM_RETURN_KEY,
+#     jinja_render: bool = True,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить информацию из xcom в Airflow Context для последующего использования
+
+#     Args:
+#         save_to: это имя ключа внутри Airflow Context, в которое будет сохранена информация
+#         xcom_key: это имя ключа в xcom, из которого будет взята информация
+#         task_ids: это идентификаторы задач, из которых будет взята информация, например имя предыдущего таска
+#         jinja_render: если True, то объект будет предварительно обработан через jinja
+
+#     Examples:
+#         сохраним в context["prev_task_result"] результат выполнения функции, которая возвращает словарь:
+#         >>> @task()
+#             @cx_save_from_xcom("prev_task_result", "my_prev_task")
+#             @pipe(pipe_stage=PipeStage.After)
+#              def my_task():
+#                 pass
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextSaveFromXcomModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 save_to=save_to,
+#                 task_ids=task_ids,
+#                 xcom_key=xcom_key,
+#                 jinja_render=jinja_render,
+#                 save_if=not_none_or_undifined,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
+
+
+class ContextSaveToXcomModule(PipeTask):
+    def __init__(
+        self,
+        context_key: str,
+        template_render: Callable,
+        jinja_template: str,
+        xcom_key: str,
+        save_if: Callable[[Any, Any], bool] | bool | str,
+    ):
+        super().__init__(context_key)
+        super().set_template_fields(["xcom_key"])
+        super().set_template_render(template_render)
+
+        self.ti_key = "ti"
+        self.jinja_template = jinja_template
+        self.xcom_key = xcom_key
+        self.save_if = save_if
+
+    def __call__(self, context):
+        self.render_template_fields(context)
+
+        res = self.template_render(self.jinja_template, context)
+
+        if self.save_if_eval(context, res):
+            ti: TaskInstance = context[self.ti_key]
+            res = ti.xcom_push(key=self.xcom_key, value=res)
+    
+    def save_if_eval(self, context, res):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
+
+
+
+def cx_save_to_xcom(
+    jinja_template: str,
+    xcom_key: str = XCOM_RETURN_KEY,
+    save_if: Callable[[Any, Any], bool] | bool | str = True,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить информацию в xcom из Airflow Context для последующего использования
+
+    Args:
+        jinja_template: это шаблон jinja с помощью которого можно взять любой объект из Airflow Context
+        xcom_key: это имя ключа в xcom, в которое будет сохранена информация
+
+    Examples:
+        вернем в xcom название дага:
+        > return_value - это значение ключа в xcom по умолчанию. С таким ключем сохраняются все значения в xcom если не указано инное
+        >>> @task()
+            @cx_save_to_xcom("{{ dag.dag_id }}", "return_value")
+            @pipe(pipe_stage=PipeStage.After)
+             def my_task():
+                pass
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ContextSaveToXcomModule(
+                builder.context_key,
+                builder.template_render,
+                jinja_template=jinja_template,
+                xcom_key=xcom_key,
+                save_if=save_if,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+# def cx_save_to_xcom_if_not_empty(
+#     jinja_template: str,
+#     xcom_key: str = XCOM_RETURN_KEY,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет сохранить информацию в xcom из Airflow Context
+#     Если значение вычисленное значение в jinja_template существует (не None)
+
+#     Args:
+#         jinja_template: это шаблон jinja с помощью которого можно взять любой объект из Airflow Context
+#         xcom_key: это имя ключа в xcom, в которое будет сохранена информация
+
+#     Examples:
+#         вернем в xcom название дага:
+#         > return_value - это значение ключа в xcom по умолчанию. С таким ключем сохраняются все значения в xcom если не указано инное
+#         >>> @task()
+#             @cx_save_to_xcom_if_note_none("{{ dag.dag_id }}", "return_value")
+#             @pipe(pipe_stage=PipeStage.After)
+#              def my_task():
+#                 pass
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextSaveToXcomModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 jinja_template=jinja_template,
+#                 xcom_key=xcom_key,
+#                 save_if=not_none_or_undifined,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
 
 
 class PrintComplexObject:
@@ -182,8 +426,7 @@ class PrintComplexObject:
             case None:
                 logger.info("None")
             case res:
-                res = pprint.pformat(res, depth=5)
-                logger.info(res)
+                logger.info(str(res))
 
 
 class ContextPrintModule(PipeTask):
@@ -192,6 +435,7 @@ class ContextPrintModule(PipeTask):
         context_key: str,
         template_render: Callable,
         jinja_template: Any | str,
+        print_if: Callable[[Any, Any], bool] | bool | str,
     ):
         super().__init__(context_key)
         super().set_template_fields([])
@@ -199,6 +443,7 @@ class ContextPrintModule(PipeTask):
 
         self.ti_key = "ti"
         self.jinja_template = jinja_template
+        self.print_if = print_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -206,11 +451,23 @@ class ContextPrintModule(PipeTask):
 
         res = self.template_render(self.jinja_template, context)
 
-        logger.info(f">>> print: {self.jinja_template}")
-        PrintComplexObject(res)(logger)
+        if self.print_if_eval(context, res):
+            logger.info(f">>> print: {self.jinja_template}")
+            PrintComplexObject(res)(logger)
 
+    def print_if_eval(self, context, res):
+        match self.print_if:
+            case bool():
+                save_if = self.print_if
+            case str():
+                save_if = self.template_render(self.print_if, context)
+            case _:
+                save_if = self.print_if(context, res)
+
+        return save_if
 def cx_print(
     jinja_template: Any | str,
+    print_if: Callable[[Any, Any], bool] | bool | str = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
@@ -234,12 +491,47 @@ def cx_print(
                 builder.context_key,
                 builder.template_render,
                 jinja_template=jinja_template,
+                print_if=print_if,
             ),
             pipe_stage,
         )
         return builder
 
     return wrapper
+
+# def cx_print_if_not_empty(
+#     jinja_template: Any | str,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет вывести в лог результат jinja выражения
+#     Но выполнит это только если результат не None или undifined
+
+#     Args:
+#         jinja_template: jinja шаблон, который будет выполнен, а его результат будет выведен в лог
+
+#     Examples:
+#         В лог будет выведено значение dag.dag_id
+#         >>> @task()
+#         >>> @cx_print("{{ dag.dag_id }}")
+#         >>> @pipe(pipe_stage=PipeStage.After)
+#         >>> def my_task():
+#         >>>     pass
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextPrintModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 jinja_template=jinja_template,
+#                 print_if=not_none_or_undifined,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
 
 
 class ContextPrintResultModule(PipeTask):
@@ -248,6 +540,7 @@ class ContextPrintResultModule(PipeTask):
         context_key: str,
         template_render: Callable,
         jinja_render: bool,
+        print_if: Callable[[Any, Any], bool] | bool | str,
     ):
         super().__init__(context_key)
         super().set_template_fields([])
@@ -255,6 +548,7 @@ class ContextPrintResultModule(PipeTask):
 
         self.ti_key = "ti"
         self.jinja_render = jinja_render
+        self.print_if = print_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -266,10 +560,23 @@ class ContextPrintResultModule(PipeTask):
         if self.jinja_render:
             res = self.template_render(res, context)
 
-        PrintComplexObject(res)(logger)
+        if self.print_if_eval(context, res):
+            PrintComplexObject(res)(logger)
+
+    def print_if_eval(self, context, res):
+        match self.print_if:
+            case bool():
+                save_if = self.print_if
+            case str():
+                save_if = self.template_render(self.print_if, context)
+            case _:
+                save_if = self.print_if(context, res)
+
+        return save_if
 
 def cx_print_result(
     jinja_render: bool = True,
+    print_if: Callable[[Any, Any], bool] | bool | str = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
@@ -290,12 +597,44 @@ def cx_print_result(
                 builder.context_key,
                 builder.template_render,
                 jinja_render=jinja_render,
+                print_if=print_if,
             ),
             pipe_stage,
         )
         return builder
 
     return wrapper
+
+# def cx_print_result_if_not_empty(
+#     jinja_render: bool = True,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Модуль позволяет вывести в лог return декорируемой функции
+#     Но только в случае если результат не None или undifined
+
+#     Examples:
+#         Результат работы декорируемой функции my_task() будет выведен в лог: {"key": "value"}
+#         >>> @task()
+#         >>> @cx_print_result()
+#         >>> @pipe(pipe_stage=PipeStage.After)
+#         >>> def my_task():
+#         >>>     return {"key": "value"}
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextPrintResultModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 jinja_render=jinja_render,
+#                 print_if=not_none_or_undifined,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
 
 
 class ContextRenderResultModule(PipeTask):
@@ -355,6 +694,7 @@ class ContextPrintXComModule(PipeTask):
         task_ids: str | Iterable[str],
         xcom_key: str,
         jinja_render: bool,
+        print_if: Callable[[Any, Any], bool] | bool | str,
     ):
         super().__init__(context_key)
         super().set_template_fields([])
@@ -364,6 +704,7 @@ class ContextPrintXComModule(PipeTask):
         self.task_ids = task_ids
         self.xcom_key = xcom_key
         self.jinja_render = jinja_render
+        self.print_if = print_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -373,14 +714,27 @@ class ContextPrintXComModule(PipeTask):
 
         if self.jinja_render:
             res = self.template_render(res, context)
-        
-        logger = logging.getLogger(self.__class__.__name__)
-        logger.info(f">>> print xcom {self.task_ids}.{self.xcom_key}:")
-        PrintComplexObject(res)(logger)
+
+        if self.print_if_eval(context, res):
+            logger = logging.getLogger(self.__class__.__name__)
+            logger.info(f">>> print xcom {self.task_ids}.{self.xcom_key}:")
+            PrintComplexObject(res)(logger)
+    
+    def print_if_eval(self, context, res):
+        match self.print_if:
+            case bool():
+                save_if = self.print_if
+            case str():
+                save_if = self.template_render(self.print_if, context)
+            case _:
+                save_if = self.print_if(context, res)
+
+        return save_if
 
 def cx_print_xcom(
     task_ids: str | Iterable[str],
     xcom_key: str = XCOM_RETURN_KEY,
+    print_if: Callable[[Any, Any], bool] | bool | str = True,
     jinja_render: bool = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -410,12 +764,55 @@ def cx_print_xcom(
                 task_ids=task_ids,
                 xcom_key=xcom_key,
                 jinja_render=jinja_render,
+                print_if=print_if,
             ),
             pipe_stage,
         )
         return builder
 
     return wrapper
+
+
+# def cx_print_xcom_if_not_empty(
+#     task_ids: str | Iterable[str],
+#     xcom_key: str = XCOM_RETURN_KEY,
+#     jinja_render: bool = True,
+#     pipe_stage: Optional[PipeStage] = None,
+# ):
+#     """
+#     Позволяет отрендерить xcom значение в лог (для дебага)
+#     Но выполнит это только в случае если значение не None или undifined
+
+#     Args:
+#         task_ids: id таска, который вернул значение в xcom
+#         xcom_key: ключ xcom.
+#             По умолчанию это XCOM_RETURN_KEY. Однако если предыдущий таск использовать xcom_push, то нужно указать ключ с которым происходил push значения
+
+#     Examples:
+#         Предположим предыдущий таск называется my_prev_task и он вернул значение {"dag_name": "my_dag"}
+#         В таком случае функция принтанёт это значение в логи
+#         >>> @task()
+#             @cx_print_xcom_if_not_none_or_undifined(task_ids="my_prev_task")
+#             @pipe(pipe_stage=PipeStage.After)
+#             def my_task():
+#                 pass
+#     """
+
+#     def wrapper(builder: PipeTaskBuilder):
+#         builder.add_module(
+#             ContextPrintXComModule(
+#                 builder.context_key,
+#                 builder.template_render,
+#                 task_ids=task_ids,
+#                 xcom_key=xcom_key,
+#                 jinja_render=jinja_render,
+#                 print_if=not_none_or_undifined,
+#             ),
+#             pipe_stage,
+#         )
+#         return builder
+
+#     return wrapper
 
 
 if __name__ == "__main__":
@@ -454,7 +851,7 @@ if __name__ == "__main__":
         @task()
         @cx_print_result(jinja_render=True)
         @pipe(pipe_stage=PipeStage.After)
-        def cx_print_jinja_result_with_jinja_render_test():
+        def cx_print_result_with_jinja_render_test():
             return {
                 "dag_name": "{{ dag.dag_id }}",
                 "sum": "{{ 1+2 }}",
@@ -482,16 +879,23 @@ if __name__ == "__main__":
         @pipe(pipe_stage=PipeStage.After)
         def cx_print_xcom_test():
             pass
+
+        @task()
+        @cx_print_result()
+        @pipe(pipe_stage=PipeStage.After)
+        def cx_save_if_not_none_test():
+            return {"my_key": "my_key"}
         
         _ = (
-            cx_save_without_jinja_render_test()
-            >> cx_save_with_jinja_render_test()
-            >> cx_print_result_without_jinja_render_test()
-            >> cx_print_jinja_result_with_jinja_render_test()
-            >> cx_render_jinja_result_test()
-            >> cx_render_jinja_result_test()
-            >> cx_save_from_xcom_test()
-            >> cx_print_xcom_test()
+            # cx_save_without_jinja_render_test()
+            # >> cx_save_with_jinja_render_test()
+            # >> cx_print_result_without_jinja_render_test()
+            # >> cx_print_jinja_result_with_jinja_render_test()
+            # >> cx_render_jinja_result_test()
+            # >> cx_render_jinja_result_test()
+            # >> cx_save_from_xcom_test()
+            # >> cx_print_xcom_test()
+            cx_save_if_not_none_test()
         )
 
     my_dag = gen_dag()
