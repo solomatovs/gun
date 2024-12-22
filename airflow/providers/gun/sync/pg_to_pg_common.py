@@ -385,17 +385,24 @@ class PostgresManipulator:
     def _table_path_exp(
         self,
         cursor: psycopg2.extensions.cursor,
-        schema: str,
+        schema: Optional[str],
         table: str,
     ):
-        _table_path = (
-            psycopg2.sql.SQL("{}.{}")
-            .format(
-                psycopg2.sql.Identifier(schema),
-                psycopg2.sql.Identifier(table)
+        if schema is None:
+            _table_path = (
+                psycopg2.sql.SQL("{}")
+                .format(psycopg2.sql.Identifier(table))
+                .as_string(cursor)
             )
-            .as_string(cursor)
-        )
+        else:
+            _table_path = (
+                psycopg2.sql.SQL("{}.{}")
+                .format(
+                    psycopg2.sql.Identifier(schema),
+                    psycopg2.sql.Identifier(table)
+                )
+                .as_string(cursor)
+            )
 
         return _table_path
 
@@ -568,7 +575,7 @@ Please check manually
     def pg_create_table(
         self,
         cursor: psycopg2.extensions.cursor,
-        schema: str,
+        schema: Optional[str],
         table: str,
         columns: Sequence[str],
         create_table_template: str,
@@ -583,12 +590,8 @@ Please check manually
             }
         )
 
-        self.log.info(
-            f"I'm trying to create a table {schema}.{table} using the following operation:"
-        )
         self.log.info(f"{stmp}")
         cursor.execute(stmp)
-        # cursor.connection.commit()
 
     def pg_drop_table(
         self,
@@ -836,6 +839,125 @@ where 1=1
         }).decode(encoding='utf-8', errors='strict')
         
         cursor.execute(stmp)
+
+    def pg_delete_from_column_another_table_in_one_postgres(
+        self,
+        cursor,
+        delete_schema,
+        delete_table,
+        delete_alias,
+        delete_field,
+        select_schema,
+        select_table,
+        select_alias,
+        select_field,
+    ):
+        tmpl = """
+delete from
+    {delete_path} as {delete_alias}
+using
+    {select_path} as {select_alias}
+where 1=1
+    and {delete_field} = {select_field}
+"""
+        _delete_path = self._table_path_exp(cursor, delete_schema, delete_table)
+        _select_path = self._table_path_exp(cursor, select_schema, select_table)
+
+        _delete_alias = (
+             psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(delete_alias),
+            )
+            .as_string(cursor)
+        )
+        _select_alias = (
+             psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+            )
+            .as_string(cursor)
+        )
+
+        _delete_field = (
+            psycopg2.sql.SQL("{}.{}")
+            .format(
+                psycopg2.sql.Identifier(delete_alias),
+                psycopg2.sql.Identifier(delete_field),
+            )
+            .as_string(cursor)
+        )
+        _select_field = (
+            psycopg2.sql.SQL("{}.{}")
+            .format(
+                psycopg2.sql.Identifier(select_alias),
+                psycopg2.sql.Identifier(select_field),
+            )
+            .as_string(cursor)
+        )
+
+        stmp = tmpl.format(**{
+                "delete_path": _delete_path,
+                "select_path": _select_path,
+                "delete_alias": _delete_alias,
+                "select_alias": _select_alias,
+                "delete_field": _delete_field,
+                "select_field": _select_field,
+            }
+        )
+        
+        cursor.execute(stmp)
+
+
+
+    def pg_transfer_one_column_between_two_postgres(
+        self,
+        select_cursor,
+        select_schema,
+        select_table,
+        select_field,
+        insert_cursor,
+        insert_schema,
+        insert_table,
+        insert_field,
+    ):
+        _insert_table = self._table_path_exp(insert_cursor, insert_schema, insert_table)
+        _insert_field = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(insert_field ),
+            )
+            .as_string(insert_cursor)
+        )
+        copy_to_stmp = """copy {insert_table} (
+{insert_field}
+) from stdin""".format(
+            **{
+                "insert_table": _insert_table,
+                "insert_field": _insert_field,
+            }
+        )
+        
+        _select_table = self._table_path_exp(select_cursor, select_schema, select_table)
+        _select_field = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(select_field ),
+            )
+            .as_string(select_cursor)
+        )
+        copy_from_stmp = """copy (
+select
+{select_field}
+from
+    {select_table}
+) to stdout""".format(
+            **{
+                "select_table": _select_table,
+                "select_field": _select_field,
+            }
+        )
+
+        return copy_from_stmp, copy_to_stmp
 
 
     def pg_insert_select_in_one_postgres(

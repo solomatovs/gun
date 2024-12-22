@@ -141,6 +141,34 @@ class PostgresToPostgresDataReloadCompareColumn:
             or self.tgt is None
         )
 
+    def create_tgt_fields_stmp(self, pg_cursor):
+        if self.is_exclude_column():
+            return None
+        elif self.rendering_value is not None:
+            match self.rendering_type:
+                case "column" if self.src is not None:
+                    ty = pg_type_stmp_text(self.src)
+                    res = psycopg2.sql.Identifier(self.rendering_value)
+                    res = psycopg2.sql.SQL("{}").format(res)
+                    res = res.as_string(pg_cursor)
+                    res = "{} {}".format(res, ty)
+                    return res
+                case _:
+                    raise RuntimeError(
+                        f"unsupported rendering create table column: {self.rendering_type} {self.rendering_value}"
+                    )
+        else:
+            if self.tgt:
+                ty = pg_type_stmp_text(self.tgt)
+            else:
+                return None
+            
+            res = psycopg2.sql.Identifier(self.name)
+            res = psycopg2.sql.SQL("{}").format(res)
+            res = res.as_string(pg_cursor)
+            res = "{} {}".format(res, ty)
+            return res
+
     def select_field(self, alias: str, pg_cursor):
         if self.is_exclude_column():
             return None
@@ -217,6 +245,50 @@ class PostgresToPostgresDataReloadCompareColumn:
         else:
             return None
 
+    def src_field_name(self):
+        if self.is_exclude_column():
+            return None
+        elif self.rendering_value is not None:
+            match self.rendering_type:
+                case "column":
+                    val = self.rendering_value
+                    return val
+                case "exp":
+                    return None
+                case "native":
+                    return None
+                case _:
+                    raise RuntimeError(
+                        f"unsupported rendering type: {self.rendering_type}"
+                    )
+        elif self.src:
+            val = self.src[self.column_name_key]
+            return val
+        else:
+            return None
+
+    def tgt_field_name(self):
+        if self.is_exclude_column():
+            return None
+        elif self.rendering_value is not None:
+            match self.rendering_type:
+                case "column":
+                    val = self.rendering_value
+                    return val
+                case "exp":
+                    return None
+                case "native":
+                    return None
+                case _:
+                    raise RuntimeError(
+                        f"unsupported rendering type: {self.rendering_type}"
+                    )
+        elif self.tgt:
+            val = self.tgt[self.column_name_key]
+            return val
+        else:
+            return None
+
 @runtime_checkable
 class PostgresReloadStrategy(Protocol):
     """Абстрактный класс для запуска перезагрузки данных
@@ -224,12 +296,12 @@ class PostgresReloadStrategy(Protocol):
     """
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         pass
@@ -348,8 +420,6 @@ class PostgresReloadStrategy(Protocol):
             
             context["source_row"] = source_row
             context["target_row"] = target_row
-            
-            select_cursor.connection.commit()
         else:
             # обрати внимание, что используется оба курсора select_cursor и insert_cursor
             # потому что были переданы разные объекты в эти переменные
@@ -387,11 +457,8 @@ class PostgresReloadStrategy(Protocol):
             context["source_row"] = source_row
             context["target_row"] = target_row
 
-            insert_cursor.connection.commit()
-            select_cursor.connection.commit()
 
-
-class PostgresDeleteDoNothingStrategy(PostgresReloadStrategy):
+class PostgresDeleteNothingStrategy(PostgresReloadStrategy):
     def __init__(self) -> None:
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -399,18 +466,18 @@ class PostgresDeleteDoNothingStrategy(PostgresReloadStrategy):
     
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("delete strategy: without delete")
 
 
-class PostgresInsertDoNothingStrategy(PostgresReloadStrategy):
+class PostgresInsertNothingStrategy(PostgresReloadStrategy):
     def __init__(self) -> None:
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -418,12 +485,12 @@ class PostgresInsertDoNothingStrategy(PostgresReloadStrategy):
     
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("insert strategy: without insert")
@@ -436,40 +503,40 @@ class PostgresInsertFullStrategy(PostgresReloadStrategy):
     
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("insert strategy: full insert")
         
         select_alias, select_fields, select_params, insert_fields = self.make_basic_meta(
             union_columns,
-            select_cursor,
-            insert_cursor,
+            src_cursor,
+            tgt_cursor,
         )
 
         self.common_insert_select(
             context=context,
             log=self.log,
             pg_man=self.pg_man,
-            select_cursor=select_cursor,
-            select_schema=select_schema,
-            select_table=select_table,
+            select_cursor=src_cursor,
+            select_schema=src_schema,
+            select_table=src_table,
             select_alias=select_alias,
             select_fields=select_fields,
             select_params=select_params,
             select_where=None,
-            insert_cursor=insert_cursor,
-            insert_schema=insert_schema,
-            insert_table=insert_table,
+            insert_cursor=tgt_cursor,
+            insert_schema=tgt_schema,
+            insert_table=tgt_table,
             insert_fields=insert_fields,
         )
 
-class PostgresTruncateStrategy(PostgresReloadStrategy):
+class PostgresDeleteUseTruncateStrategy(PostgresReloadStrategy):
     def __init__(self) -> None:
         super().__init__()
         self.log = logging.getLogger(self.__class__.__name__)
@@ -477,12 +544,12 @@ class PostgresTruncateStrategy(PostgresReloadStrategy):
     
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("delete strategy: truncate")
@@ -490,19 +557,17 @@ class PostgresTruncateStrategy(PostgresReloadStrategy):
         delete_row = 0
 
         self.pg_man.pg_truncate_table(
-            insert_cursor,
-            insert_schema,
-            insert_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
         )
-        self.log.info(f"status: {insert_cursor.statusmessage}")
+        self.log.info(f"status: {tgt_cursor.statusmessage}")
         
-        if insert_cursor.rowcount != -1:
-            delete_row += insert_cursor.rowcount
+        if tgt_cursor.rowcount != -1:
+            delete_row += tgt_cursor.rowcount
         
         context["delete_row"] = delete_row
-        # выполняю commit только после завершения всех операций
-        # а именно в insert_new_data
-        # insert_cursor.connection.commit()
+
 
 class PostgresDeleteFullStrategy(PostgresReloadStrategy):
     def __init__(self) -> None:
@@ -512,12 +577,12 @@ class PostgresDeleteFullStrategy(PostgresReloadStrategy):
     
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("delete strategy: truncate")
@@ -525,20 +590,16 @@ class PostgresDeleteFullStrategy(PostgresReloadStrategy):
         delete_row = 0
 
         self.pg_man.pg_delete_all_from_table(
-            insert_cursor,
-            insert_schema,
-            insert_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
         )
-        self.log.info(f"status: {insert_cursor.statusmessage}")
+        self.log.info(f"status: {tgt_cursor.statusmessage}")
         
-        if insert_cursor.rowcount != -1:
-            delete_row += insert_cursor.rowcount
+        if tgt_cursor.rowcount != -1:
+            delete_row += tgt_cursor.rowcount
         
         context["delete_row"] = delete_row
-        # выполняю commit только после завершения всех операций
-        # а именно в insert_new_data
-        # insert_cursor.connection.commit()
-
 
 
 class PostgresPeriodReloadModel:
@@ -547,7 +608,7 @@ class PostgresPeriodReloadModel:
         self.period_from = period_from
         self.period_to = period_to
 
-    def validate_delete_period_model(self):
+    def validate_model(self):
         res = True
         res_text = ""
 
@@ -621,12 +682,12 @@ Possible values:
     
     def make_meta(self,
         context,
-        select_cursor: psycopg2.extensions.cursor,
-        select_schema,
-        select_table,
-        insert_cursor: psycopg2.extensions.cursor,
-        insert_schema,
-        insert_table,
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema,
+        src_table,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_schema,
+        tgt_table,
         union_columns: List[PostgresToPostgresDataReloadCompareColumn],
     ):
         # нужно отрендерить модель через Jinja
@@ -647,7 +708,7 @@ Possible values:
         model: PostgresPeriodReloadModel = PostgresPeriodReloadModel(**model)
 
         # эх, в python 3.11 появится нормальная валидация на основе TypedDict, а пока делаю самостоятельно
-        is_valid = model.validate_delete_period_model()
+        is_valid = model.validate_model()
         if is_valid[0] is False:
             raise RuntimeError("Error validation PostgresDeletePeriodModel:{}\npassed value: {}".format(is_valid[1], model))
 
@@ -655,12 +716,12 @@ Possible values:
 
         select_alias = "s"
         select_fields = map(
-            lambda column: column.select_field(select_alias, select_cursor), columns.copy()
+            lambda column: column.select_field(select_alias, src_cursor), columns.copy()
         )
         select_fields = [x for x in select_fields if x is not None]
 
         select_params = map(
-            lambda column: column.select_param(select_cursor), columns.copy()
+            lambda column: column.select_param(src_cursor), columns.copy()
         )
         select_params = [x for x in select_params if x is not None]
 
@@ -675,25 +736,24 @@ Possible values:
         # проверяем, что в таблице только одно поле с таким названием
         if len(where_fields) > 1:
             raise ValueError(f"""More than one matching column was found {model.field},
-but it is expected that the table contains one field with the name: {select_schema}.{select_table}
+but it is expected that the table contains one field with the name: {src_schema}.{src_table}
 The table contains the following columns:
 {columns.copy()}
 """)
         elif len(where_fields) == 0:
-            raise RuntimeError(f"""Column {model.field} not found in table: {select_schema}.{select_table}
+            raise RuntimeError(f"""Column {model.field} not found in table: {src_schema}.{src_table}
 The table contains the following columns:
 {columns.copy()}
 """)
         else:
             where_field = where_fields[0]
 
-        # надо проверить!!! or возможно не нужен
         where_field = where_field.name
         where_period_from = model.period_from
         where_period_to = model.period_to
 
         insert_fields = map(
-            lambda column: column.insert_field(insert_cursor), columns.copy()
+            lambda column: column.insert_field(tgt_cursor), columns.copy()
         )
         insert_fields = [x for x in insert_fields if x is not None]
 
@@ -706,7 +766,8 @@ The table contains the following columns:
             where_period_to,
             insert_fields,
         )
-    
+
+
 class PostgresDeletePeriodStrategy(PostgresPeriodBaseStrategy):
     """Выполняет удаление данных по заданному периоду
     delete from {pg_table}
@@ -716,12 +777,12 @@ class PostgresDeletePeriodStrategy(PostgresPeriodBaseStrategy):
     """
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
         self.log.info("delete strategy: delete range")
@@ -736,30 +797,30 @@ class PostgresDeletePeriodStrategy(PostgresPeriodBaseStrategy):
             insert_fields,
         ) = self.make_meta(
             context,
-            select_cursor,
-            select_schema,
-            select_table,
-            insert_cursor,
-            insert_schema,
-            insert_table,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
             union_columns,
         )
 
         delete_row = 0
 
         self.pg_man.pg_delete_period_from_table(
-            cursor=insert_cursor,
-            schema=insert_schema,
-            table=insert_table,
+            cursor=tgt_cursor,
+            schema=tgt_schema,
+            table=tgt_table,
             field=where_field,
             period_from=where_period_from,
             period_to=where_period_to,
         )
 
-        self.log.info(f"status: {insert_cursor.statusmessage}")
+        self.log.info(f"status: {tgt_cursor.statusmessage}")
         
-        if insert_cursor.rowcount != -1:
-            delete_row += insert_cursor.rowcount
+        if tgt_cursor.rowcount != -1:
+            delete_row += tgt_cursor.rowcount
         
         context["delete_row"] = delete_row
 
@@ -778,15 +839,15 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
     """
     def execute(self,
         context,
-        select_cursor,
-        select_schema,
-        select_table,
-        insert_cursor,
-        insert_schema,
-        insert_table,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
         union_columns,
     ):
-        """Переливка данных по периоду из select_cursor в insert_cursor
+        """Переливка данных по периоду из src_cursor в tgt_cursor
         Выполняет insert ... select ... запрос с фильтрациией по периоду
         """
 
@@ -802,26 +863,26 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
             insert_fields,
         ) = self.make_meta(
             context,
-            select_cursor,
-            select_schema,
-            select_table,
-            insert_cursor,
-            insert_schema,
-            insert_table,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
             union_columns,
         )
 
         source_row = 0
         target_row = 0
 
-        if select_cursor is insert_cursor:
+        if src_cursor is tgt_cursor:
             query_stmp = self.pg_man.pg_insert_select_period_in_one_postgres(
-                cursor=select_cursor,
-                insert_schema=insert_schema,
-                insert_table=insert_table,
+                cursor=src_cursor,
+                insert_schema=tgt_schema,
+                insert_table=tgt_table,
                 insert_fields=insert_fields,
-                select_schema=select_schema,
-                select_table=select_table,
+                select_schema=src_schema,
+                select_table=src_table,
                 select_fields=select_fields,
                 select_alias=select_alias,
                 where_field=where_field,
@@ -829,27 +890,25 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
                 where_period_to=where_period_to,
             )
             
-            select_cursor.execute(query_stmp, select_params)
+            src_cursor.execute(query_stmp, select_params)
 
-            self.log.info(f"rows: {select_cursor.rowcount}")
+            self.log.info(f"rows: {src_cursor.rowcount}")
 
-            if select_cursor.rowcount != -1:
-                source_row += select_cursor.rowcount
-                target_row += select_cursor.rowcount
+            if src_cursor.rowcount != -1:
+                source_row += src_cursor.rowcount
+                target_row += src_cursor.rowcount
             
             context["source_row"] = source_row
             context["target_row"] = target_row
-            
-            select_cursor.connection.commit()
         else:
             copy_from_stmp, copy_to_stmp = self.pg_man.pg_insert_select_period_between_two_postgres(
-                insert_cursor=insert_cursor,
-                insert_schema=insert_schema,
-                insert_table=insert_table,
+                insert_cursor=tgt_cursor,
+                insert_schema=tgt_schema,
+                insert_table=tgt_table,
                 insert_fields=insert_fields,
-                select_cursor=select_cursor,
-                select_schema=select_schema,
-                select_table=select_table,
+                select_cursor=src_cursor,
+                select_schema=src_schema,
+                select_table=src_table,
                 select_fields=select_fields,
                 select_alias=select_alias,
                 where_field=where_field,
@@ -858,29 +917,295 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
             )
 
             PostgresCopyExpertToPostgres.execute(
-                src_cursor=select_cursor,
+                src_cursor=src_cursor,
                 src_query=copy_from_stmp,
                 src_params=select_params,
-                tgt_cursor=insert_cursor,
+                tgt_cursor=tgt_cursor,
                 tgt_query=copy_to_stmp,
                 tgt_params=None,
             )
 
-            self.log.info(f"select rows: {select_cursor.rowcount}")
-            self.log.info(f"insert rows: {insert_cursor.rowcount}")
+            self.log.info(f"select rows: {src_cursor.rowcount}")
+            self.log.info(f"insert rows: {tgt_cursor.rowcount}")
             
-            if insert_cursor.rowcount != -1:
-                source_row += select_cursor.rowcount
+            if tgt_cursor.rowcount != -1:
+                source_row += src_cursor.rowcount
             
-            if insert_cursor.rowcount != -1:
-                target_row += insert_cursor.rowcount
+            if tgt_cursor.rowcount != -1:
+                target_row += tgt_cursor.rowcount
             
             context["source_row"] = source_row
             context["target_row"] = target_row
 
-            insert_cursor.connection.commit()
-            select_cursor.connection.commit()
 
+class PostgresColumnReloadModel:
+    def __init__(self, field: str) -> None:
+        self.field = field
+
+    def validate_model(self):
+        res = True
+        res_text = ""
+
+        match self.field:
+            case None:
+                res = False
+                res_text += f"\nMissing '{field_name}'"
+            case x if isinstance(x, str):
+                pass
+            case x:
+                res = False
+                res_text += f"\nWrong type: 'field'. Expected type str, got {type(x)}"
+
+        return res, res_text
+
+class PostgresColumnSetBaseStrategy(PostgresReloadStrategy):
+    def __init__(self,
+        inner: str,
+    ) -> None:
+        super().__init__()
+        self.log = logging.getLogger(self.__class__.__name__)
+        self.pg_man = PostgresManipulator(self.log)
+
+        if inner is None:
+            raise RuntimeError("PostgresColumnSetBaseStrategy is None. Make sure it passed to the function correctly")
+        
+        # model может быть только str (либо название поля, либо jinja template для вычисления названия поля)
+        if isinstance(inner, str):
+            self.inner = inner
+        else:
+            raise RuntimeError(f"""Invalid PostgresColumnSetBaseStrategy value
+Invalid type was passed: {type(inner)}
+{inner}
+
+Possible values:
+- Jinja template -> field_name
+- field_name""")
+
+    @staticmethod
+    def render_template(val, context):
+            task = context["task"]
+            jinja_env = task.get_template_env()
+            val = task.render_template(
+                val,
+                context,
+                jinja_env,
+                set(),
+            )
+            return val
+    
+    def make_meta(self,
+        context,
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema,
+        src_table,
+        tgt_cursor: psycopg2.extensions.cursor,
+        tgt_schema,
+        tgt_table,
+        union_columns: List[PostgresToPostgresDataReloadCompareColumn],
+    ):
+        # нужно отрендерить модель через Jinja
+        model = PostgresColumnSetBaseStrategy.render_template(self.inner, context)
+        if model is None:
+            raise RuntimeError("PostgresColumnReloadModel is None. Make sure it passed to the function correctly")
+        
+        # model может быть только str
+        if not isinstance(model, str):
+            raise RuntimeError(f"""Invalid PostgresColumnReloadModel value
+Invalid type was passed: {type(model)}
+{model}
+
+Possible values:
+- Jinja template -> field_name
+- field_name""")
+        
+        model: PostgresColumnReloadModel = PostgresColumnReloadModel(model)
+
+        is_valid = model.validate_model()
+        if is_valid[0] is False:
+            raise RuntimeError("Error validation PostgresColumnReloadModel:{}\npassed value: {}".format(is_valid[1], model))
+
+        columns = sorted(union_columns)
+
+        select_alias = "s"
+        select_fields = map(
+            lambda column: column.select_field(select_alias, src_cursor), columns.copy()
+        )
+        select_fields = [x for x in select_fields if x is not None]
+
+        select_params = map(
+            lambda column: column.select_param(src_cursor), columns.copy()
+        )
+        select_params = [x for x in select_params if x is not None]
+
+        # здесь происходит поиск поля, которое передал пользователь в списке полей таблицы
+        # по этому полю будет происходить reload данных и соответственно будут формироваться sql запросы
+        # если такого поля нет, то выбрасывается ошибка, так как пользователь может ошибиться в названии поля
+        # следует помнить, что список полей приходит в процессе работы приложения и может меняться с течением времени
+        # поэтому нужно проверять, что такое поле есть в списке полей которые на данный момент в таблице
+        # также обрати внимание что происходит прямое сравнение с учетом регистра
+        compare_fields = [x for x in columns.copy() if x is not None and x.name == model.field]
+
+        # проверяем, что в таблице только одно поле с таким названием
+        if len(compare_fields) > 1:
+            raise ValueError(f"""More than one matching column was found {model.field},
+but it is expected that the table contains one field with the name: {src_schema}.{src_table}
+The table contains the following columns:
+{columns.copy()}
+""")
+        elif len(compare_fields) == 0:
+            raise RuntimeError(f"""Column {model.field} not found in table: {src_schema}.{src_table}
+The table contains the following columns:
+{columns.copy()}
+""")
+        else:
+            compare_field = compare_fields[0]
+
+        select_field = compare_field.src_field_name()
+        delete_field = compare_field.tgt_field_name()
+
+        if select_field is None:
+            raise ValueError(f"""Column {model.field} not found in table: {src_schema}.{src_table}""")
+
+        if delete_field is None:
+            raise ValueError(f"""Column {model.field} not found in table: {src_schema}.{src_table}""")
+        
+        insert_fields = map(
+            lambda column: column.insert_field(tgt_cursor), columns.copy()
+        )
+        insert_fields = [x for x in insert_fields if x is not None]
+
+        return (
+            select_alias,
+            select_fields,
+            select_params,
+            insert_fields,
+            select_field,
+            delete_field,
+            compare_field,
+        )
+    
+class PostgresDeleteUseColumnStrategy(PostgresColumnSetBaseStrategy):
+    """Выполняет удаление данных по заданному полю
+delete from
+    {delete_path} as {delete_alias}
+unisng
+    {select_path} as {select_alias}
+where 1=1
+    and {delete_field} = {select_field}
+    """
+    def execute(self,
+        context,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
+        union_columns,
+    ):
+        self.log.info("delete strategy: delete use column")
+
+        (
+            select_alias,
+            select_fields,
+            select_params,
+            insert_fields,
+            select_field,
+            delete_field,
+            compare_field,
+        ) = self.make_meta(
+            context,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            union_columns,
+        )
+
+        delete_row = 0
+
+        if src_cursor is tgt_cursor:
+            query_stmp = self.pg_man.pg_delete_from_column_another_table_in_one_postgres(
+                cursor=src_cursor,
+                delete_schema=tgt_schema,
+                delete_table=tgt_table,
+                delete_alias="d",
+                delete_field=delete_field,
+                select_schema=src_schema,
+                select_table=src_table,
+                select_alias="s",
+                select_field=select_field,
+            )
+            
+            src_cursor.execute(query_stmp, select_params)
+
+            self.log.info(f"rows: {src_cursor.statusmessage}")
+
+            if src_cursor.rowcount != -1:
+                delete_row += src_cursor.rowcount
+            
+            context["delete_row"] = delete_row
+        else:
+            create_table_tpl = "create temporary table {pg_table} ({pg_columns})"
+            compare_column_stmp = compare_field.create_tgt_fields_stmp(tgt_cursor)
+            if compare_column_stmp is None:
+                raise ValueError("failed to load information from reload column")
+
+            self.log.info(f"create tmp table on target")
+            tgt_table_tmp = "tmp"
+            self.pg_man.pg_create_table(
+                cursor=tgt_cursor,
+                schema=None,
+                table=tgt_table_tmp,
+                columns=[compare_column_stmp],
+                create_table_template=create_table_tpl,
+            )
+
+            copy_from_stmp, copy_to_stmp = self.pg_man.pg_transfer_one_column_between_two_postgres(
+                select_cursor=src_cursor,
+                select_schema=src_schema,
+                select_table=src_table,
+                select_field=select_field,
+                insert_cursor=tgt_cursor,
+                insert_schema=None,
+                insert_table=tgt_table_tmp,
+                insert_field=delete_field,
+            )
+
+            self.log.info(f"copy column: {src_schema}.{src_table}.{select_field} -> {tgt_table_tmp}.{delete_field}")
+            PostgresCopyExpertToPostgres.execute(
+                src_cursor=src_cursor,
+                src_query=copy_from_stmp,
+                src_params=None,
+                tgt_cursor=tgt_cursor,
+                tgt_query=copy_to_stmp,
+                tgt_params=None,
+            )
+
+            self.log.info(f"send rows: {src_cursor.rowcount}")
+            self.log.info(f"recv rows: {tgt_cursor.rowcount}")
+
+            self.log.info(f"delete rows use tmp table")
+            query_stmp = self.pg_man.pg_delete_from_column_another_table_in_one_postgres(
+                cursor=tgt_cursor,
+                delete_schema=tgt_schema,
+                delete_table=tgt_table,
+                delete_alias="d",
+                delete_field=delete_field,
+                select_schema=None,
+                select_table=tgt_table_tmp,
+                select_alias="s",
+                select_field=delete_field,
+            )
+
+            self.log.info(f"rows: {tgt_cursor.statusmessage}")
+
+            if tgt_cursor.rowcount != -1:
+                delete_row += tgt_cursor.rowcount
+            
+            context["delete_row"] = delete_row
 
 
 class PostgresToPostgresDataReload:
@@ -1008,6 +1333,11 @@ class PostgresToPostgresDataReload:
             tgt_table,
             union_columns,
         )
+
+        # выполняем commit на обоих курсорах
+        tgt_cursor.connection.commit()
+        src_cursor.connection.commit()
+        self.log.info("sync data done")
 
     def union_src_tgt_and_rules(
         self,
@@ -1365,26 +1695,26 @@ exclude_columns represents a list of ["column_name_1", "column_name_2", ...]
         # выполняю валидацию delete_strategy
         if delete_strategy is None:
             # по умолчанию выбираю отсутствие удаления, если ничего небыло передано
-            delete_strategy = PostgresDeleteDoNothingStrategy()
+            delete_strategy = PostgresDeleteNothingStrategy()
 
         if not isinstance(delete_strategy, PostgresReloadStrategy):
             raise RuntimeError(f"""delete_strategy parameter unsupported type: {type(delete_strategy)}
 parameter reload_strategy must be of type PostgresDeleteStrategy and support variants:
-- PostgresDeleteDoNothingStrategy
-- PostgresTruncateStrategy
+- PostgresDeleteUseTruncateStrategy
 - PostgresDeleteFullStrategy
 - PostgresDeletePeriodStrategy
+- PostgresDeleteUseColumnStrategy
     """)
 
         # выполняю валидацию delete_strategy
         if insert_strategy is None:
             # по умолчанию выбираю отсутствие удаления, если ничего небыло передано
-            insert_strategy = PostgresInsertDoNothingStrategy()
+            insert_strategy = PostgresInsertNothingStrategy()
 
         if not isinstance(insert_strategy, PostgresReloadStrategy):
             raise RuntimeError(f"""insert_strategy parameter unsupported type: {type(insert_strategy)}
 parameter reload_strategy must be of type PostgresDeleteStrategy and support variants:
-- PostgresInsertDoNothingStrategy
+- PostgresInsertNothingStrategy
 - PostgresInsertFullStrategy
 - PostgresInsertPeriodStrategy
     """)
@@ -1423,7 +1753,7 @@ class PostgresToPostgresFullReload(PostgresToPostgresDataReload):
             tgt_cursor,
             tgt_schema,
             tgt_table,
-            delete_strategy=PostgresTruncateStrategy(),
+            delete_strategy=PostgresDeleteUseTruncateStrategy(),
             insert_strategy=PostgresInsertFullStrategy(),
             rename_columns=rename_columns,
             override_columns=override_columns,
@@ -1470,7 +1800,7 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
         self.rename_columns = rename_columns
         self.override_columns = override_columns
         self.exclude_columns = exclude_columns
-        self.delete_strategy = PostgresTruncateStrategy()
+        self.delete_strategy = PostgresDeleteUseTruncateStrategy()
         self.insert_strategy = PostgresInsertFullStrategy()
         self.stack = ExitStack()
 
@@ -1726,7 +2056,7 @@ def pg_full_reload(
                 pg_cur_key,
                 tgt_schema,
                 tgt_table,
-                delete_strategy=PostgresTruncateStrategy(),
+                delete_strategy=PostgresDeleteUseTruncateStrategy(),
                 insert_strategy=PostgresInsertFullStrategy(),
                 rename_columns=rename_columns,
                 override_columns=override_columns,
@@ -1791,7 +2121,7 @@ def pg_to_pg_full_reload(
                 tgt_cur_key,
                 tgt_schema,
                 tgt_table,
-                delete_strategy=PostgresTruncateStrategy(),
+                delete_strategy=PostgresDeleteUseTruncateStrategy(),
                 insert_strategy=PostgresInsertFullStrategy(),
                 rename_columns=rename_columns,
                 override_columns=override_columns,
