@@ -332,7 +332,7 @@ class PostgresToPostgresSchemaCheck:
             exclude_columns=self.exclude_columns,
         )
 
-        self.check_schema(
+        self.schema_check(
             src_cursor,
             src_schema,
             src_table,
@@ -764,7 +764,7 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
 
         return union_columns
 
-    def check_schema(
+    def schema_check(
         self,
         src_cursor,
         src_schema: str,
@@ -783,27 +783,39 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
         self.log.info(f"pg src: {src_cursor.connection.dsn}")
         self.log.info(f"pg tgt: {tgt_cursor.connection.dsn}")
 
-        union_columns = self.make_fields_info(
-            src_table_check=src_table_check,
-            src_cursor=src_cursor,
-            src_schema=src_schema,
-            src_table=src_table,
-            tgt_cursor=tgt_cursor,
-            tgt_schema=tgt_schema,
-            tgt_table=tgt_table,
-            rule_columns=rule_columns,
+        self.log.info(
+            f"load field info: {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"
         )
 
-        self.log.info(
-            f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
-        )
-        equal_schema, error = self.check_equal_structure(
-            src_schema,
-            src_table,
-            tgt_schema,
-            tgt_table,
-            union_columns,
-        )
+        try:
+            union_columns = self.make_fields_info(
+                src_table_check=src_table_check,
+                src_cursor=src_cursor,
+                src_schema=src_schema,
+                src_table=src_table,
+                tgt_cursor=tgt_cursor,
+                tgt_schema=tgt_schema,
+                tgt_table=tgt_table,
+                rule_columns=rule_columns,
+            )
+
+            self.log.info(
+                f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
+            )
+            equal_schema, error = self.check_equal_structure(
+                src_schema,
+                src_table,
+                tgt_schema,
+                tgt_table,
+                union_columns,
+            )
+
+            return equal_schema, error
+        except RuntimeError as e:
+            self.log.info(
+            f"""failed to load field info:
+{e}""")
+            return True, f"{e}"
         
         
 
@@ -841,6 +853,21 @@ class PostgresToPostgresSchemaSync:
         self.exclude_columns = exclude_columns
         self.pg_man = PostgresManipulator(logger)
 
+        # проверка структуры вынесена в отдельный класс
+        self.schema_checker = PostgresToPostgresSchemaCheck(
+            logger=self.log,
+            src_cursor=self.src_cursor,
+            src_schema =self.src_schema,
+            src_table =self.src_table,
+            tgt_cursor =self.tgt_cursor,
+            tgt_schema =self.tgt_schema,
+            tgt_table =self.tgt_table,
+            src_table_check =self.src_table_check,
+            rename_columns=self.rename_columns,
+            override_schema=self.override_schema,
+            exclude_columns=self.exclude_columns,
+        )
+
     def execute(self, context):
         src_cursor = self.src_cursor
         tgt_cursor = self.tgt_cursor
@@ -867,7 +894,7 @@ class PostgresToPostgresSchemaSync:
             self.create_table_template,
         )
 
-        self.sync_schema(
+        self.schema_sync(
             schema_strategy,
             src_cursor,
             src_schema,
@@ -901,12 +928,6 @@ class PostgresToPostgresSchemaSync:
         else:
             raise TypeError(
                 f"schema_strategy type not valid: {type(schema_strategy)}: {schema_strategy}. Please use class PostgresSchemaStrategy"
-            )
-
-        if src_table_check is None or not isinstance(src_table_check, bool):
-            raise RuntimeError(
-                f"""'src_table_check' parameter must be bool
-{type(src_table_check)}: {src_table_check}"""
             )
 
         if create_table_template is None:
@@ -951,158 +972,23 @@ create table {pg_table} ({pg_columns})
         ):
             raise RuntimeError(error_render_template)
 
-        rule_columns: List[PostgresToPostgresSchemaSyncOverrideColumn] = []
-
-        if not rename_columns:
-            rename_columns = {}
-
-        if isinstance(rename_columns, Dict):
-            for name, rename_from in rename_columns.items():
-                if isinstance(name, str) and isinstance(rename_from, str):
-                    index = None
-                    for i in range(len(rule_columns)):
-                        val = rule_columns[i]
-                        if val.name == rename_from:
-                            index = i
-                            break
-
-                    if index is not None:
-                        val = rule_columns[index]
-                        val.name = name
-                        val.rename_from = rename_from
-                    else:
-                        rule_columns.append(
-                            PostgresToPostgresSchemaSyncOverrideColumn(
-                                name=name,
-                                rename_from=rename_from,
-                            )
-                        )
-                else:
-                    raise RuntimeError(
-                        """
-Error validating parameter "rename_columns[{}]: unsupported type
-
-rename_columns has an unsupported type.
-rename_columns represents a set of {
-    "column_name_in_tgt": "column_name_in_src",
-    "column_name_in_tgt_1": "column_name_in_src_2",
-} (dictionary)
-
-
-The parameter passed was of type: {}
-Its value: {}""".format(
-                            name, type(rename_from), rename_from
-                        )
-                    )
-        else:
-            raise RuntimeError(
-                """
-Error validating parameter "rename_columns"
-
-rename_columns has an unsupported type.
-rename_columns represents a set of {
-    "column_name_in_tgt": "column_name_in_src",
-    "column_name_in_tgt_1": "column_name_in_src_2",
-} (dictionary)
-
-
-The parameter passed was of type: {}
-Its value: {}""".format(
-                    type(rename_columns), rename_columns
-                )
-            )
-
-        # проверяю существует ли переопределение колонок, если нет то выставляю пустой словарь, для удобства работы в дальнейшем
-        if not override_schema:
-            override_schema = {}
-
-        if isinstance(override_schema, Dict):
-            # здесь я делаю нормализацию override_schema и привожу к классу PostgresSchemaSyncOverrideColumn
-            for name, override_type in override_schema.items():
-                if isinstance(name, str) and isinstance(override_type, str):
-                    if name in rule_columns:
-                        val = rule_columns[rule_columns.index(name)]
-                        val.override_type = override_type
-                    else:
-                        rule_columns.append(
-                            PostgresToPostgresSchemaSyncOverrideColumn(
-                                name=name,
-                                override_type=override_type,
-                            )
-                        )
-                else:
-                    raise RuntimeError(
-                        f"""
-Error validating parameter "override_schema[{name}]: unsupported type
-the value type must be str
-and must be the type of the column, for example:
-- varchar(200) not null
-- bigserial
-- integer not null default 0
-
-type: {type(override_type)}
-value: {override_type}"""
-                    )
-        else:
-            raise RuntimeError(
-                """
-Error validating parameter "override_schema"
-
-override_schema has an unsupported type.
-override_schema represents a set of {
-    "column_name": "data type",
-    "column_name_2": "varchar(200) not null default now()",
-} (dictionary)
-with which to override the schema of individual columns
-
-The parameter passed was of type: {}
-Its value: {}""".format(
-                    type(override_schema), override_schema
-                )
-            )
-
-        if not exclude_columns:
-            exclude_columns = []
-
-        if isinstance(exclude_columns, List):
-            for name in exclude_columns:
-                if isinstance(name, str):
-                    if name in rule_columns:
-                        val = rule_columns[rule_columns.index(name)]
-                        val.exclude = True
-                    else:
-                        rule_columns.append(
-                            PostgresToPostgresSchemaSyncOverrideColumn(
-                                name=name,
-                                exclude=True,
-                            )
-                        )
-                else:
-                    raise RuntimeError(
-                        """
-Error validating parameter "exclude_columns"
-
-exclude_columns has an unsupported type.
-exclude_columns represents a List[str] of ["column_name_in_src", "column_name_in_src", ..]
-
-The parameter passed was of type: {}
-Its value: {}""".format(
-                            type(name), name
-                        )
-                    )
-        else:
-            raise RuntimeError(
-                """
-Error validating parameter "exclude_columns"
-
-exclude_columns has an unsupported type.
-exclude_columns represents a List[str] of ["column_name_in_src", "column_name_in_src", ..]
-
-The parameter passed was of type: {}
-Its value: {}""".format(
-                    type(exclude_columns), exclude_columns
-                )
-            )
+        (
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            src_table_check,
+            rule_columns,
+        ) = self.schema_checker.clean_validate_and_flatten_params(
+            src_schema=src_schema,
+            src_table=src_table,
+            tgt_schema=tgt_schema,
+            tgt_table=tgt_table,
+            src_table_check=src_table_check,
+            rename_columns=rename_columns,
+            override_schema=override_schema,
+            exclude_columns=exclude_columns,
+        )
 
         return (
             src_schema,
@@ -1114,59 +1000,8 @@ Its value: {}""".format(
             create_table_template,
             rule_columns,
         )
-
-    def make_fields_info(
-        self,
-        src_table_check,
-        src_cursor,
-        src_schema,
-        src_table,
-        tgt_cursor,
-        tgt_schema,
-        tgt_table,
-        rule_columns,
-    ):
-        if src_table_check:
-            if src_schema is None or src_table is None:
-                raise RuntimeError(
-                    f"""src_schema or src_table is None
-src_schema = {src_schema}
-src_table = {src_table}
-
-Please pass "src_schema" and "src_table", or disable the "src_table_check" check
-"""
-                )
-            self.log.info(f"Checking src table existence: {src_schema}.{src_table} ...")
-            if not self.pg_man.pg_check_table_exist(src_cursor, src_schema, src_table):
-                raise RuntimeError(
-                    f"""src_table_check = {src_table_check}
-The table: {src_schema}.{src_table} not found in {src_cursor.connection.dsn}
-
-Please make sure of this manually, or disable the "src_table_check" parameter"""
-                )
-        else:
-            self.log.info(f"src_table_check = {src_table_check}")
-
-        if src_schema is not None and src_table is not None:
-            src_info = self.pg_man.pg_get_fields(src_cursor, src_schema, src_table)
-        else:
-            src_info = []
-
-        tgt_info = self.pg_man.pg_get_fields(tgt_cursor, tgt_schema, tgt_table)
-
-        union_columns = self.union_src_tgt_and_rules(
-            src_schema,
-            src_table,
-            tgt_schema,
-            tgt_table,
-            src_info,
-            tgt_info,
-            rule_columns,
-        )
-
-        return union_columns
-
-    def sync_schema(
+    
+    def schema_sync(
         self,
         schema_strategy,
         src_cursor,
@@ -1196,7 +1031,7 @@ To automatically create a schema, use the strategy:
 - drop_and_create_table_if_exist
 """
 
-        union_columns = self.make_fields_info(
+        union_columns = self.schema_checker.make_fields_info(
             src_table_check,
             src_cursor,
             src_schema,
@@ -1230,7 +1065,7 @@ I'm trying to create a table"""
                     )
 
                     # после создания таблицы нужно обновить информацию о колонках
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1254,7 +1089,7 @@ I'm trying to create a table"""
                 self.log.info(
                     f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_structure(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1313,7 +1148,7 @@ Probably an error occurred that could not be processed.
 Please create table manually"""
                         )
 
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1327,7 +1162,7 @@ Please create table manually"""
                 self.log.info(
                     f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_structure(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1367,7 +1202,7 @@ creating a new table {tgt_schema}.{tgt_table}"""
                         f"""Table created successfully: {tgt_schema}.{tgt_table}"""
                     )
 
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1407,7 +1242,7 @@ creating a new table {tgt_schema}.{tgt_table}"""
                         f"""Table created successfully: {tgt_schema}.{tgt_table}"""
                     )
 
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1457,7 +1292,7 @@ Probably an error occurred that could not be processed.
 Please create table manually"""
                         )
 
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1471,7 +1306,7 @@ Please create table manually"""
                 self.log.info(
                     f"""Checking equal schema between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_structure(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1512,7 +1347,7 @@ I'm trying to create a table"""
                         f"""Table created successfully: {tgt_schema}.{tgt_table}"""
                     )
 
-                    union_columns = self.make_fields_info(
+                    union_columns = self.schema_checker.make_fields_info(
                         src_table_check,
                         src_cursor,
                         src_schema,
@@ -1561,7 +1396,7 @@ trying to create it"""
                     f"""Table created successfully: {tgt_schema}.{tgt_table}"""
                 )
 
-                union_columns = self.make_fields_info(
+                union_columns = self.schema_checker.make_fields_info(
                     src_table_check,
                     src_cursor,
                     src_schema,
@@ -1670,196 +1505,6 @@ Please check the correctness of the parameter 'schema_strategy'"""
             table,
             pg_info,
         )
-
-    def check_equal_structure(
-        self,
-        src_schema,
-        src_table,
-        tgt_schema,
-        tgt_table,
-        union_columns: List[PostgresToPostgresSchemaSyncCompareColumn],
-    ):
-        self.log.info("matching rules:")
-        for rule in union_columns:
-            self.log.info(f"{rule}")
-
-        diff = map(lambda column: column.compare_column(), union_columns)
-        diff = filter(lambda x: not x[0], diff)
-        diff = list(diff)
-
-        if len(diff) > 0:
-            error = f"""Error validation columns
-
-src: {src_schema}.{src_table}
-tgt: {tgt_schema}.{tgt_table}
-        """
-            for k, v in diff:
-                error += f"""
-reason: {v}
-        """
-            error += f"""
-
-Please make the columns src and tgt equal or disable validation
-        """
-            return False, error
-        else:
-            return True, "ok"
-
-    def union_src_tgt_and_rules(
-        self,
-        src_schema,
-        src_table,
-        tgt_schema,
-        tgt_table,
-        src_info: List[Dict],
-        tgt_info: List[Dict],
-        rule_columns: List[PostgresToPostgresSchemaSyncOverrideColumn],
-    ):
-        column_name = "column_name"
-        ordinal_position = "ordinal_position"
-
-        # для начала составлю полный список филдов
-        # выбиру из src имена и переопределю их через override_schema
-        src_fields = list(
-            map(
-                lambda x: PostgresToPostgresSchemaSyncCompareColumn(
-                    name=x[column_name],
-                    src_schema=src_schema,
-                    src_table=src_table,
-                    tgt_schema=tgt_schema,
-                    tgt_table=tgt_table,
-                    src=x,
-                    ordinal_position=x[ordinal_position],
-                ),
-                src_info,
-            )
-        )
-        tgt_fields = list(
-            map(
-                lambda x: PostgresToPostgresSchemaSyncCompareColumn(
-                    name=x[column_name],
-                    src_schema=src_schema,
-                    src_table=src_table,
-                    tgt_schema=tgt_schema,
-                    tgt_table=tgt_table,
-                    tgt=x,
-                    ordinal_position=x[ordinal_position],
-                ),
-                tgt_info,
-            )
-        )
-
-        # нужно пройтись по rule_columns найти соответствия правилам и прописать их в PostgresCompareColumn
-        # это необходимо что бы корректно выполнить матчинг между src, tgt и rules
-        for rule in rule_columns:
-            # выполняю ренейм колонок из src, что бы они корректно матчились с tgt
-            for i in range(len(src_fields)):
-                val = src_fields[i]
-                if val.name == rule.rename_from:
-                    val.name = rule.name
-                    val.rename_from = rule.rename_from
-
-            # выполняю простановку правил override type и исключение колонок exclude
-            for i in range(len(tgt_fields)):
-                val = tgt_fields[i]
-                if val.name == rule.name:
-                    if rule.override_type:
-                        val.override_type = rule.override_type
-                    if rule.exclude:
-                        val.exclude = rule.exclude
-
-        # объединяю информацию в один список PostgresCompareColumn, где будут находится все атрибуты сравнения
-        # src_info, tgt_info, override_schema
-        columns: List[PostgresToPostgresSchemaSyncCompareColumn] = []
-        max_ordinal = 0
-        for src, tgt, rule in itertools.zip_longest(
-            src_fields, tgt_fields, rule_columns, fillvalue=None
-        ):
-            if src:
-                max_ordinal = (
-                    src.ordinal_position
-                    if src.ordinal_position > max_ordinal
-                    else max_ordinal
-                )
-
-                if src.name in columns:
-                    val = columns[columns.index(src.name)]
-                    val.src = src.src
-
-                    if src.rename_from:
-                        val.rename_from = src.rename_from
-
-                    if src.ordinal_position:
-                        val.ordinal_position = src.ordinal_position
-                else:
-                    columns.append(src)
-
-            if tgt:
-                max_ordinal = (
-                    tgt.ordinal_position
-                    if tgt.ordinal_position > max_ordinal
-                    else max_ordinal
-                )
-
-                if tgt.name in columns:
-                    val = columns[columns.index(tgt.name)]
-                    val.tgt = tgt.tgt
-
-                    if tgt.override_type:
-                        val.override_type = tgt.override_type
-
-                    if tgt.exclude:
-                        val.exclude = tgt.exclude
-
-                    if tgt.ordinal_position:
-                        val.ordinal_position = tgt.ordinal_position
-                else:
-                    columns.append(tgt)
-
-            if rule:
-                if rule.name in columns:
-                    val = columns[columns.index(rule.name)]
-
-                    if rule.rename_from:
-                        val.rename_from = rule.rename_from
-
-                    if rule.override_type:
-                        val.override_type = rule.override_type
-
-                    if rule.exclude:
-                        val.exclude = rule.exclude
-                else:
-                    max_ordinal += 1
-                    columns.append(
-                        PostgresToPostgresSchemaSyncCompareColumn(
-                            name=rule.name,
-                            src_schema=src_schema,
-                            src_table=src_table,
-                            tgt_schema=tgt_schema,
-                            tgt_table=tgt_table,
-                            src=None,
-                            tgt=None,
-                            ordinal_position=max_ordinal,
-                            rename_from=rule.rename_from,
-                            override_type=rule.override_type,
-                            exclude=rule.exclude,
-                        )
-                    )
-
-        if len(columns) == 0:
-            raise RuntimeError(
-                f"""It was not possible to generate a list of rules for synchronizing schemas.
-Pay attention to the src and tgt data, maybe the problem lies in them
-
-{src_schema}.{src_table} -> {tgt_schema}.{tgt_table}
-
-src_columns: {src_info}
-tgt_columns {tgt_info}
-manual_columns: {rule_columns}
-"""
-            )
-
-        return columns
 
 
 class PostgresToPostgresSchemaSyncOperator(BaseOperator):
