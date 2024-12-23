@@ -116,47 +116,6 @@ def not_none_or_undifined(context, res):
     
     return True
 
-# def cx_save_if_not_empty(
-#     save_to: str,
-#     save_object: Any,
-#     jinja_render: bool = True,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Модуль позволяет сохранить любую информацию в Airflow Context 
-#     В случае если объект не None или undefined
-
-#     Args:
-#         save_to: это имя ключа внутри Airflow Context, в которое будет сохранена информация
-#         save_object: это объект, который будет сохранён в Airflow Context
-#         save_if: это функция, которая будет вызвана с результатом выполнения save_object
-#         jinja_render: если True, то объект будет предварительно обработан через jinja
-
-#     Examples:
-#         сохраним в context["my_key"] результат выполнения функции, которая возвращает словарь:
-#         >>> @task()
-#             @cx_save_if_not_empty("my_key", "{{ params.target_row }}")
-#             @pipe(pipe_stage=PipeStage.After)
-#              def my_task():
-#                 pass
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextSaveModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 save_to=save_to,
-#                 save_object=save_object,
-#                 save_if=not_none_or_undifined,
-#                 jinja_render=jinja_render,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
-
 
 class ContextSaveFromXcomModule(PipeTask):
     def __init__(
@@ -247,48 +206,6 @@ def cx_save_from_xcom(
 
     return wrapper
 
-# def cx_save_from_xcom_if_not_empty(
-#     save_to: str,
-#     task_ids: str | Iterable[str],
-#     xcom_key: str = XCOM_RETURN_KEY,
-#     jinja_render: bool = True,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Модуль позволяет сохранить информацию из xcom в Airflow Context для последующего использования
-
-#     Args:
-#         save_to: это имя ключа внутри Airflow Context, в которое будет сохранена информация
-#         xcom_key: это имя ключа в xcom, из которого будет взята информация
-#         task_ids: это идентификаторы задач, из которых будет взята информация, например имя предыдущего таска
-#         jinja_render: если True, то объект будет предварительно обработан через jinja
-
-#     Examples:
-#         сохраним в context["prev_task_result"] результат выполнения функции, которая возвращает словарь:
-#         >>> @task()
-#             @cx_save_from_xcom("prev_task_result", "my_prev_task")
-#             @pipe(pipe_stage=PipeStage.After)
-#              def my_task():
-#                 pass
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextSaveFromXcomModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 save_to=save_to,
-#                 task_ids=task_ids,
-#                 xcom_key=xcom_key,
-#                 jinja_render=jinja_render,
-#                 save_if=not_none_or_undifined,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
-
 
 class ContextSaveToXcomModule(PipeTask):
     def __init__(
@@ -296,16 +213,16 @@ class ContextSaveToXcomModule(PipeTask):
         context_key: str,
         template_render: Callable,
         jinja_template: str,
-        xcom_key: str,
+        save_to: str,
         save_if: Callable[[Any, Any], bool] | bool | str,
     ):
         super().__init__(context_key)
-        super().set_template_fields(["xcom_key"])
+        super().set_template_fields(["save_to"])
         super().set_template_render(template_render)
 
         self.ti_key = "ti"
         self.jinja_template = jinja_template
-        self.xcom_key = xcom_key
+        self.save_to = save_to
         self.save_if = save_if
 
     def __call__(self, context):
@@ -315,7 +232,7 @@ class ContextSaveToXcomModule(PipeTask):
 
         if self.save_if_eval(context, res):
             ti: TaskInstance = context[self.ti_key]
-            res = ti.xcom_push(key=self.xcom_key, value=res)
+            res = ti.xcom_push(key=self.save_to, value=res)
     
     def save_if_eval(self, context, res):
         match self.save_if:
@@ -332,7 +249,7 @@ class ContextSaveToXcomModule(PipeTask):
 
 def cx_save_to_xcom(
     jinja_template: str,
-    xcom_key: str = XCOM_RETURN_KEY,
+    save_to: str = XCOM_RETURN_KEY,
     save_if: Callable[[Any, Any], bool] | bool | str = True,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -341,7 +258,7 @@ def cx_save_to_xcom(
 
     Args:
         jinja_template: это шаблон jinja с помощью которого можно взять любой объект из Airflow Context
-        xcom_key: это имя ключа в xcom, в которое будет сохранена информация
+        save_to: это имя ключа в xcom, в которое будет сохранена информация
 
     Examples:
         вернем в xcom название дага:
@@ -359,7 +276,7 @@ def cx_save_to_xcom(
                 builder.context_key,
                 builder.template_render,
                 jinja_template=jinja_template,
-                xcom_key=xcom_key,
+                save_to=save_to,
                 save_if=save_if,
             ),
             pipe_stage,
@@ -367,45 +284,6 @@ def cx_save_to_xcom(
         return builder
 
     return wrapper
-
-
-# def cx_save_to_xcom_if_not_empty(
-#     jinja_template: str,
-#     xcom_key: str = XCOM_RETURN_KEY,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Модуль позволяет сохранить информацию в xcom из Airflow Context
-#     Если значение вычисленное значение в jinja_template существует (не None)
-
-#     Args:
-#         jinja_template: это шаблон jinja с помощью которого можно взять любой объект из Airflow Context
-#         xcom_key: это имя ключа в xcom, в которое будет сохранена информация
-
-#     Examples:
-#         вернем в xcom название дага:
-#         > return_value - это значение ключа в xcom по умолчанию. С таким ключем сохраняются все значения в xcom если не указано инное
-#         >>> @task()
-#             @cx_save_to_xcom_if_note_none("{{ dag.dag_id }}", "return_value")
-#             @pipe(pipe_stage=PipeStage.After)
-#              def my_task():
-#                 pass
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextSaveToXcomModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 jinja_template=jinja_template,
-#                 xcom_key=xcom_key,
-#                 save_if=not_none_or_undifined,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
 
 
 class PrintComplexObject:
@@ -773,48 +651,6 @@ def cx_print_xcom(
     return wrapper
 
 
-# def cx_print_xcom_if_not_empty(
-#     task_ids: str | Iterable[str],
-#     xcom_key: str = XCOM_RETURN_KEY,
-#     jinja_render: bool = True,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Позволяет отрендерить xcom значение в лог (для дебага)
-#     Но выполнит это только в случае если значение не None или undifined
-
-#     Args:
-#         task_ids: id таска, который вернул значение в xcom
-#         xcom_key: ключ xcom.
-#             По умолчанию это XCOM_RETURN_KEY. Однако если предыдущий таск использовать xcom_push, то нужно указать ключ с которым происходил push значения
-
-#     Examples:
-#         Предположим предыдущий таск называется my_prev_task и он вернул значение {"dag_name": "my_dag"}
-#         В таком случае функция принтанёт это значение в логи
-#         >>> @task()
-#             @cx_print_xcom_if_not_none_or_undifined(task_ids="my_prev_task")
-#             @pipe(pipe_stage=PipeStage.After)
-#             def my_task():
-#                 pass
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextPrintXComModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 task_ids=task_ids,
-#                 xcom_key=xcom_key,
-#                 jinja_render=jinja_render,
-#                 print_if=not_none_or_undifined,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
-
-
 if __name__ == "__main__":
     from pathlib import Path
     from airflow.decorators import task, dag
@@ -887,15 +723,15 @@ if __name__ == "__main__":
             return {"my_key": "my_key"}
         
         _ = (
-            # cx_save_without_jinja_render_test()
-            # >> cx_save_with_jinja_render_test()
-            # >> cx_print_result_without_jinja_render_test()
-            # >> cx_print_jinja_result_with_jinja_render_test()
-            # >> cx_render_jinja_result_test()
-            # >> cx_render_jinja_result_test()
-            # >> cx_save_from_xcom_test()
-            # >> cx_print_xcom_test()
-            cx_save_if_not_none_test()
+            cx_save_without_jinja_render_test()
+            >> cx_save_with_jinja_render_test()
+            >> cx_print_result_without_jinja_render_test()
+            >> cx_print_result_with_jinja_render_test()
+            >> cx_render_jinja_result_test()
+            >> cx_render_jinja_result_test()
+            >> cx_save_from_xcom_test()
+            >> cx_print_xcom_test()
+            >> cx_save_if_not_none_test()
         )
 
     my_dag = gen_dag()

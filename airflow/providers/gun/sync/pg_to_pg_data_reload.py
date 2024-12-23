@@ -140,7 +140,7 @@ class PostgresToPostgresDataReloadCompareColumn:
             or (self.src is None and self.rendering_value is None)
             or self.tgt is None
         )
-
+    
     def create_tgt_fields_stmp(self, pg_cursor):
         if self.is_exclude_column():
             return None
@@ -148,7 +148,7 @@ class PostgresToPostgresDataReloadCompareColumn:
             match self.rendering_type:
                 case "column" if self.src is not None:
                     ty = pg_type_stmp_text(self.src)
-                    res = psycopg2.sql.Identifier(self.rendering_value)
+                    res = psycopg2.sql.Identifier(self.name)
                     res = psycopg2.sql.SQL("{}").format(res)
                     res = res.as_string(pg_cursor)
                     res = "{} {}".format(res, ty)
@@ -270,19 +270,6 @@ class PostgresToPostgresDataReloadCompareColumn:
     def tgt_field_name(self):
         if self.is_exclude_column():
             return None
-        elif self.rendering_value is not None:
-            match self.rendering_type:
-                case "column":
-                    val = self.rendering_value
-                    return val
-                case "exp":
-                    return None
-                case "native":
-                    return None
-                case _:
-                    raise RuntimeError(
-                        f"unsupported rendering type: {self.rendering_type}"
-                    )
         elif self.tgt:
             val = self.tgt[self.column_name_key]
             return val
@@ -729,26 +716,29 @@ Possible values:
         # по этому полю будет происходить reload данных и соответственно будут формироваться sql запросы
         # если такого поля нет, то выбрасывается ошибка, так как пользователь может ошибиться в названии поля
         # следует помнить, что список полей приходит в процессе работы приложения и может меняться с течением времени
-        # поэтому нужно проверять, что такое поле есть в списке полей которые на данный момент в таблице
+        # также обрати внимание что PostgresPeriodBaseStrategy это базовый клас для Delete и Insert вариантов реализаций
+        # в них могут использоваться разные столбцы, так как может быть передан параметр rename_column, exclude_column
         # также обрати внимание что происходит прямое сравнение с учетом регистра
-        where_fields = [x for x in columns.copy() if x is not None and x.name == model.field]
+        where_fields = [x for x in columns.copy() if x.name == model.field and not x.is_exclude_column()]
 
         # проверяем, что в таблице только одно поле с таким названием
+        def concat_columns(cols):
+            return "\n".join([str(x) for x in cols])
+
         if len(where_fields) > 1:
             raise ValueError(f"""More than one matching column was found {model.field},
 but it is expected that the table contains one field with the name: {src_schema}.{src_table}
 The table contains the following columns:
-{columns.copy()}
+{concat_columns(columns.copy())}
 """)
         elif len(where_fields) == 0:
             raise RuntimeError(f"""Column {model.field} not found in table: {src_schema}.{src_table}
 The table contains the following columns:
-{columns.copy()}
+{concat_columns(columns.copy())}
 """)
         else:
             where_field = where_fields[0]
 
-        where_field = where_field.name
         where_period_from = model.period_from
         where_period_to = model.period_to
 
@@ -808,11 +798,15 @@ class PostgresDeletePeriodStrategy(PostgresPeriodBaseStrategy):
 
         delete_row = 0
 
+        tgt_field_name = where_field.tgt_field_name()
+        if tgt_field_name is None:
+            raise ValueError(f"tgt_field_name not found in: {where_field}")
+        
         self.pg_man.pg_delete_period_from_table(
             cursor=tgt_cursor,
             schema=tgt_schema,
             table=tgt_table,
-            field=where_field,
+            field=tgt_field_name,
             period_from=where_period_from,
             period_to=where_period_to,
         )
@@ -871,7 +865,11 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
             tgt_table,
             union_columns,
         )
-
+        
+        src_field_name = where_field.src_field_name()
+        if src_field_name is None:
+            raise ValueError(f"src_field_name not found in: {where_field}")
+        
         source_row = 0
         target_row = 0
 
@@ -885,7 +883,7 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
                 select_table=src_table,
                 select_fields=select_fields,
                 select_alias=select_alias,
-                where_field=where_field,
+                where_field=src_field_name,
                 where_period_from=where_period_from,
                 where_period_to=where_period_to,
             )
@@ -911,7 +909,7 @@ class PostgresInsertPeriodStrategy(PostgresPeriodBaseStrategy):
                 select_table=src_table,
                 select_fields=select_fields,
                 select_alias=select_alias,
-                where_field=where_field,
+                where_field=src_field_name,
                 where_period_from=where_period_from,
                 where_period_to=where_period_to,
             )
@@ -1043,32 +1041,26 @@ Possible values:
         # следует помнить, что список полей приходит в процессе работы приложения и может меняться с течением времени
         # поэтому нужно проверять, что такое поле есть в списке полей которые на данный момент в таблице
         # также обрати внимание что происходит прямое сравнение с учетом регистра
-        compare_fields = [x for x in columns.copy() if x is not None and x.name == model.field]
+        compare_fields = [x for x in columns.copy() if x.name == model.field and not x.is_exclude_column()]
+        
+        def concat_columns(cols):
+            return "\n".join([str(x) for x in cols])
 
         # проверяем, что в таблице только одно поле с таким названием
         if len(compare_fields) > 1:
             raise ValueError(f"""More than one matching column was found {model.field},
 but it is expected that the table contains one field with the name: {src_schema}.{src_table}
 The table contains the following columns:
-{columns.copy()}
+{concat_columns(columns.copy())}
 """)
         elif len(compare_fields) == 0:
             raise RuntimeError(f"""Column {model.field} not found in table: {src_schema}.{src_table}
 The table contains the following columns:
-{columns.copy()}
+{concat_columns(columns.copy())}
 """)
         else:
             compare_field = compare_fields[0]
 
-        select_field = compare_field.src_field_name()
-        delete_field = compare_field.tgt_field_name()
-
-        if select_field is None:
-            raise ValueError(f"""Column {model.field} not found in table: {src_schema}.{src_table}""")
-
-        if delete_field is None:
-            raise ValueError(f"""Column {model.field} not found in table: {src_schema}.{src_table}""")
-        
         insert_fields = map(
             lambda column: column.insert_field(tgt_cursor), columns.copy()
         )
@@ -1079,8 +1071,6 @@ The table contains the following columns:
             select_fields,
             select_params,
             insert_fields,
-            select_field,
-            delete_field,
             compare_field,
         )
     
@@ -1110,8 +1100,6 @@ where 1=1
             select_fields,
             select_params,
             insert_fields,
-            select_field,
-            delete_field,
             compare_field,
         ) = self.make_meta(
             context,
@@ -1124,6 +1112,14 @@ where 1=1
             union_columns,
         )
 
+        select_field = compare_field.src_field_name()
+        if select_field is None:
+            raise ValueError(f"select_field not found in: {compare_field}")
+        
+        delete_field = compare_field.tgt_field_name()
+        if delete_field is None:
+            raise ValueError(f"delete_field not found in: {compare_field}")
+        
         delete_row = 0
 
         if src_cursor is tgt_cursor:
