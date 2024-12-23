@@ -3198,21 +3198,21 @@ where 1=1
             if res is None:
                 return False
 
-            tipical_error = f"""pg_check_column_exist
+            common_error = f"""pg_check_column_exist
 unexpected result. Expected true, false or None
 however result type is: {type(res)}
 value: {res}"""
 
             if not isinstance(res, tuple):
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
 
             if len(res) != 1 or len(res) > 1:
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
             
             res = res[0]
 
             if not isinstance(res, bool):
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
 
             return res
 
@@ -3289,21 +3289,21 @@ where 1=1
             if res is None:
                 return False
 
-            tipical_error = f"""pg_check_column_exist
+            common_error = f"""pg_check_column_exist
 unexpected result. Expected true, false or None
 however result type is: {type(res)}
 value: {res}"""
 
             if not isinstance(res, tuple):
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
 
             if len(res) != 1 or len(res) > 1:
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
             
             res = res[0]
 
             if not isinstance(res, bool):
-                raise RuntimeError(tipical_error)
+                raise RuntimeError(common_error)
 
             return res
 

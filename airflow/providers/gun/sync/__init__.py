@@ -9,7 +9,7 @@ from airflow.providers.gun.sync.pg_to_ch_schema_sync import (
     PostgresToClickhouseSchemaStrategy,
 )
 
-from airflow.providers.gun.sync.pg_to_pg_data_reload import (
+from airflow.providers.gun.sync.pg_to_pg_data_sync import (
     pg_full_reload,
     pg_to_pg_full_reload,
     pg_to_pg_period_reload,
