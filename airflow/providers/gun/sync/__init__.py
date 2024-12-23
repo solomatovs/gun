@@ -28,6 +28,5 @@ __all__ = [
     "pg_full_reload",
     "pg_to_pg_full_reload",
     "pg_to_ch_full_reload",
-    "pg_to_pg_period_reload",
     "pg_to_pg_data_sync",
 ]
