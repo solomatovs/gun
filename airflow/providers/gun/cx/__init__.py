@@ -377,40 +377,6 @@ def cx_print(
 
     return wrapper
 
-# def cx_print_if_not_empty(
-#     jinja_template: Any | str,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Модуль позволяет вывести в лог результат jinja выражения
-#     Но выполнит это только если результат не None или undifined
-
-#     Args:
-#         jinja_template: jinja шаблон, который будет выполнен, а его результат будет выведен в лог
-
-#     Examples:
-#         В лог будет выведено значение dag.dag_id
-#         >>> @task()
-#         >>> @cx_print("{{ dag.dag_id }}")
-#         >>> @pipe(pipe_stage=PipeStage.After)
-#         >>> def my_task():
-#         >>>     pass
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextPrintModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 jinja_template=jinja_template,
-#                 print_if=not_none_or_undifined,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
-
 
 class ContextPrintResultModule(PipeTask):
     def __init__(
@@ -482,38 +448,6 @@ def cx_print_result(
         return builder
 
     return wrapper
-
-# def cx_print_result_if_not_empty(
-#     jinja_render: bool = True,
-#     pipe_stage: Optional[PipeStage] = None,
-# ):
-#     """
-#     Модуль позволяет вывести в лог return декорируемой функции
-#     Но только в случае если результат не None или undifined
-
-#     Examples:
-#         Результат работы декорируемой функции my_task() будет выведен в лог: {"key": "value"}
-#         >>> @task()
-#         >>> @cx_print_result()
-#         >>> @pipe(pipe_stage=PipeStage.After)
-#         >>> def my_task():
-#         >>>     return {"key": "value"}
-#     """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.add_module(
-#             ContextPrintResultModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 jinja_render=jinja_render,
-#                 print_if=not_none_or_undifined,
-#             ),
-#             pipe_stage,
-#         )
-#         return builder
-
-#     return wrapper
-
 
 class ContextRenderResultModule(PipeTask):
     def __init__(
