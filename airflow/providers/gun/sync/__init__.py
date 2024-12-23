@@ -1,5 +1,6 @@
 from airflow.providers.gun.sync.pg_to_pg_schema_sync import (
     pg_to_pg_schema_sync,
+    pg_to_pg_schema_check,
     PostgresToPostgresSchemaSyncOperator,
     PostgresToPostgresSchemaStrategy,
 )
@@ -24,6 +25,7 @@ from airflow.providers.gun.sync.pg_to_ch_data_full_reload import (
 
 __all__ = [
     "pg_to_pg_schema_sync",
+    "pg_to_pg_schema_check",
     "pg_to_ch_schema_sync",
     "pg_full_reload",
     "pg_to_pg_full_reload",

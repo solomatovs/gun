@@ -5,6 +5,7 @@ from typing import (
     Dict,
     Sequence,
     Union,
+    Any,
 )
 import itertools
 import logging
@@ -332,7 +333,7 @@ class PostgresToPostgresSchemaCheck:
             exclude_columns=self.exclude_columns,
         )
 
-        self.schema_check(
+        return self.schema_check(
             src_cursor,
             src_schema,
             src_table,
@@ -523,12 +524,8 @@ Its value: {}""".format(
             rule_columns,
         )
 
-    def check_equal_structure(
+    def check_equal_columns(
         self,
-        src_schema,
-        src_table,
-        tgt_schema,
-        tgt_table,
         union_columns: List[PostgresToPostgresSchemaSyncCompareColumn],
     ):
         self.log.info("matching rules:")
@@ -538,6 +535,20 @@ Its value: {}""".format(
         diff = map(lambda column: column.compare_column(), union_columns)
         diff = filter(lambda x: not x[0], diff)
         diff = list(diff)
+
+        return diff
+
+    def check_equal_columns_text(
+        self,
+        src_schema,
+        src_table,
+        tgt_schema,
+        tgt_table,
+        union_columns: List[PostgresToPostgresSchemaSyncCompareColumn],
+    ):
+        diff = self.check_equal_columns(
+            union_columns,
+        )
 
         if len(diff) > 0:
             error = f"""Error validation columns
@@ -802,20 +813,17 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
             self.log.info(
                 f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
             )
-            equal_schema, error = self.check_equal_structure(
-                src_schema,
-                src_table,
-                tgt_schema,
-                tgt_table,
+            
+            diff = self.check_equal_columns(
                 union_columns,
             )
 
-            return equal_schema, error
+            return diff
         except RuntimeError as e:
             self.log.info(
             f"""failed to load field info:
 {e}""")
-            return True, f"{e}"
+            raise e
         
         
 
@@ -1089,7 +1097,7 @@ I'm trying to create a table"""
                 self.log.info(
                     f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.schema_checker.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1162,7 +1170,7 @@ Please create table manually"""
                 self.log.info(
                     f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.schema_checker.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1306,7 +1314,7 @@ Please create table manually"""
                 self.log.info(
                     f"""Checking equal schema between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
                 )
-                equal_schema, error = self.schema_checker.check_equal_structure(
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
                     src_schema,
                     src_table,
                     tgt_schema,
@@ -1742,6 +1750,8 @@ class PostgresToPostgresSchemaCheckModule(PipeTask):
         tgt_cur_key: Optional[str],
         tgt_schema: str,
         tgt_table: str,
+        save_to: str,
+        save_if: Callable[[Any, List], bool] | bool | str,
         src_table_check: bool,
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
         override_schema: Optional[Union[str, Dict[str, str]]] = None,
@@ -1756,6 +1766,7 @@ class PostgresToPostgresSchemaCheckModule(PipeTask):
                 "tgt_cur_key",
                 "tgt_schema",
                 "tgt_table",
+                "save_to",
                 "src_table_check",
                 "rename_columns",
                 "override_schema",
@@ -1778,6 +1789,8 @@ class PostgresToPostgresSchemaCheckModule(PipeTask):
         self.src_table = src_table
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
+        self.save_to = save_to
+        self.save_if = save_if
         self.src_table_check = src_table_check
         self.rename_columns = rename_columns
         self.override_schema = override_schema
@@ -1822,14 +1835,30 @@ This can be done via 'pg_auth_airflow_conn'"""
             exclude_columns=self.exclude_columns,
         )
 
-        base_module.execute(context)
+        diff = base_module.execute(context)
 
+        if self.save_if_eval(context, diff):
+            context[self.save_to] = diff
+
+
+    def save_if_eval(self, context, res: List):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
 
 def pg_to_pg_schema_check(
     src_schema: Optional[str],
     src_table: Optional[str],
     tgt_schema: str,
     tgt_table: str,
+    save_to: str,
+    save_if: Callable[[Any, List], bool] | bool | str = True,
     src_table_check: bool = True,
     rename_columns: Optional[Union[str, Dict[str, str]]] = None,
     override_schema: Optional[Union[str, Dict[str, str]]] = None,
@@ -1849,6 +1878,8 @@ def pg_to_pg_schema_check(
                 tgt_cur_key=tgt_cur_key,
                 tgt_schema=tgt_schema,
                 tgt_table=tgt_table,
+                save_to=save_to,
+                save_if=save_if,
                 src_table_check=src_table_check,
                 rename_columns=rename_columns,
                 override_schema=override_schema,
