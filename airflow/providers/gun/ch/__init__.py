@@ -23,6 +23,7 @@ from clickhouse_driver.block import ColumnOrientedBlock
 
 from airflow.exceptions import AirflowNotFoundException
 from airflow.models.connection import Connection as AirflowConnection
+from airflow.utils.xcom import XCOM_RETURN_KEY
 
 from airflow.providers.gun.pipe import PipeTask, PipeTaskBuilder, PipeStage
 
@@ -33,6 +34,12 @@ __all__ = [
     "ch_execute_iter",
     "ch_execute_file_query",
     "ch_execute_file_queries",
+    "ch_execute_and_save_to_context",
+    "ch_execute_and_fetchone_to_context",
+    "ch_execute_and_fetchall_to_context",
+    "ch_execute_and_save_to_xcom",
+    "ch_execute_and_fetchone_to_xcom",
+    "ch_execute_and_fetchall_to_xcom",
     "ch_send_query",
     "ch_send_queries",
     "ch_send_file_query",
@@ -43,6 +50,12 @@ __all__ = [
     "ch_save_to_gzip_csv",
     "ch_save_to_xcom",
     "ch_save_to_context",
+    "ch_fetchone_to_context",
+    "ch_fetchall_to_context",
+    "ch_fetchone_to_xcom",
+    "ch_fetchall_to_xcom",
+    "ch_check_table_exist",
+    "ch_check_column_exist",
 ]
 
 
@@ -201,7 +214,7 @@ def ch_auth_airflow_conn(
     return wrapper
 
 
-class ClickhouseDisconnect(PipeTask):
+class ClickhouseDisconnectModule(PipeTask):
     def __init__(
         self,
         context_key: str,
@@ -222,7 +235,7 @@ def ch_disconnect(
 ):
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ClickhouseDisconnect(
+            ClickhouseDisconnectModule(
                 builder.context_key,
                 cur_key=cur_key,
             ),
@@ -234,7 +247,7 @@ def ch_disconnect(
     return wrapper
 
 
-class ClickhouseSendQuery(PipeTask):
+class ClickhouseSendQueryModule(PipeTask):
     """
     Отправляет sql запрос в clickhouse
     """
@@ -249,7 +262,7 @@ class ClickhouseSendQuery(PipeTask):
         client_settings: Dict[str, Any],
         query_id: Optional[str],
         end_query: bool,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -272,7 +285,7 @@ class ClickhouseSendQuery(PipeTask):
         self.settings = settings
         self.client_settings = client_settings
         self.end_query = end_query
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -283,35 +296,40 @@ class ClickhouseSendQuery(PipeTask):
         settings = self.settings
         client_settings = self.client_settings
         end_query = self.end_query
-        print_query = self.print_query
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        if query_id:
-            cur.set_query_id(query_id)
+            if settings:
+                cur.set_settings(settings)
 
-        cur.set_types_check(False)
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            cur.set_types_check(False)
 
-        if print_query:
-            print(query)
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
-        if not end_query:
-            conn.send_query(query, query_id, params)
-            conn.send_data(ColumnOrientedBlock())
-        else:
-            cur.execute(query, params)
+            if not end_query:
+                conn.send_query(query, query_id, params)
+                conn.send_data(ColumnOrientedBlock())
+            else:
+                cur.execute(query, params)
 
-        if print_query:
-            print(f"recv rows: {cur.rowcount}")
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
 
+        return execute_if
 
 def ch_send_query(
     query: str,
@@ -320,7 +338,7 @@ def ch_send_query(
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
     end_query=True,
-    print_query=False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -332,7 +350,7 @@ def ch_send_query(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ClickhouseSendQuery(
+            ClickhouseSendQueryModule(
                 builder.context_key,
                 builder.template_render,
                 query,
@@ -341,7 +359,7 @@ def ch_send_query(
                 client_settings or {},
                 query_id,
                 end_query,
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -365,7 +383,7 @@ class ClickhouseSendQueryMultiStatementsModule(PipeTask):
         client_settings: Dict[str, Any],
         query_id: Optional[str],
         sep: str,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -388,7 +406,7 @@ class ClickhouseSendQueryMultiStatementsModule(PipeTask):
         self.settings = settings
         self.client_settings = client_settings
         self.sep: str = sep
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -399,35 +417,40 @@ class ClickhouseSendQueryMultiStatementsModule(PipeTask):
         params = self.params
         query_id = self.query_id
         sep = self.sep
-        print_query = self.print_query
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        if query_id:
-            cur.set_query_id(query_id)
+            if settings:
+                cur.set_settings(settings)
 
-        cur.set_types_check(False)
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            cur.set_types_check(False)
 
-        for query_part in query.split(sep):
-            if not query_part:
-                continue
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
-            if print_query:
-                print(query_part)
+            for query_part in query.split(sep):
+                if not query_part:
+                    continue
 
-            cur.execute(query_part, params)
+                cur.execute(query_part, params)
 
-            if print_query:
-                print(f"recv rows: {cur.rowcount}")
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
 
+        return execute_if
 
 def ch_send_queries(
     query: str,
@@ -435,7 +458,7 @@ def ch_send_queries(
     settings: Optional[Dict[str, Any]] = None,
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
-    print_query: bool = False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -457,7 +480,7 @@ def ch_send_queries(
                 client_settings or {},
                 query_id,
                 ";",
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -481,7 +504,7 @@ class ClickhouseSendQueryFileModule(PipeTask):
         client_settings: Dict[str, Any],
         query_id: Optional[str],
         end_query: bool,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -504,7 +527,7 @@ class ClickhouseSendQueryFileModule(PipeTask):
         self.query_id = query_id
         self.end_query = end_query
         self.query: str = ""
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -515,37 +538,45 @@ class ClickhouseSendQueryFileModule(PipeTask):
         client_settings = self.client_settings
         query_id = self.query_id
         end_query = self.end_query
-        print_query = self.print_query
-
-        print(f"try rendering file: {sql_file}")
-        query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
-        query = self.template_render(query, context)
-        print(f"rendering success: {sql_file}")
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
+            print(f"try rendering file: {sql_file}")
+            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = self.template_render(query, context)
+            print(f"rendering success: {sql_file}")
 
-        if query_id:
-            cur.set_query_id(query_id)
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        cur.set_types_check(False)
+            if settings:
+                cur.set_settings(settings)
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if print_query:
-            print(query)
+            cur.set_types_check(False)
 
-        if not end_query:
-            conn.send_query(query, query_id, params)
-            conn.send_data(ColumnOrientedBlock())
-        else:
-            cur.execute(query, params)
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
+            if not end_query:
+                conn.send_query(query, query_id, params)
+                conn.send_data(ColumnOrientedBlock())
+            else:
+                cur.execute(query, params)
+    
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
+
+        return execute_if
 
 def ch_send_file_query(
     sql_file: str,
@@ -554,7 +585,7 @@ def ch_send_file_query(
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
     end_query=True,
-    print_query=False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -575,7 +606,7 @@ def ch_send_file_query(
                 client_settings or {},
                 query_id,
                 end_query,
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -599,7 +630,7 @@ class ClickhouseSendQueryFileMultiStatementsModule(PipeTask):
         client_settings: Dict[str, Any],
         query_id: Optional[str],
         sep: str,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -622,7 +653,7 @@ class ClickhouseSendQueryFileMultiStatementsModule(PipeTask):
         self.client_settings = client_settings
         self.query_id = query_id
         self.sep = sep
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -633,42 +664,47 @@ class ClickhouseSendQueryFileMultiStatementsModule(PipeTask):
         client_settings = self.client_settings
         query_id = self.query_id
         sep = self.sep
-        print_query = self.print_query
-
-        sql_file = os.path.expandvars(sql_file)
-        sql_file = Path(sql_file)
-        sql_file = sql_file.absolute()
-
-        query = sql_file.read_text(encoding="utf-8", errors="ignore")
-        query = self.template_render(query, context)
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
+            sql_file = os.path.expandvars(sql_file)
+            sql_file = Path(sql_file)
+            sql_file = sql_file.absolute()
 
-        if query_id:
-            cur.set_query_id(query_id)
+            query = sql_file.read_text(encoding="utf-8", errors="ignore")
+            query = self.template_render(query, context)
+            
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        cur.set_types_check(False)
+            if settings:
+                cur.set_settings(settings)
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            if query_id:
+                cur.set_query_id(query_id)
 
-        for query_part in query.split(sep):
-            if not query_part:
-                continue
+            cur.set_types_check(False)
 
-            if print_query:
-                print(query_part)
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
-            cur.execute(query_part, params)
+            for query_part in query.split(sep):
+                if not query_part:
+                    continue
 
-            if print_query:
-                print(f"recv rows: {cur.rowcount}")
+                cur.execute(query_part, params)
 
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
+
+        return execute_if
 
 def ch_send_file_queries(
     sql_file: str,
@@ -676,7 +712,7 @@ def ch_send_file_queries(
     settings: Optional[Dict[str, Any]] = None,
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
-    print_query: bool = False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -698,7 +734,7 @@ def ch_send_file_queries(
                 client_settings or {},
                 query_id,
                 ";",
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -707,91 +743,6 @@ def ch_send_file_queries(
         return builder
 
     return wrapper
-
-
-# class ClickhouseSendExternalTablesModule(PipeTask):
-#     def __init__(
-#         self,
-#         context_key: str,
-#         template_render: Callable,
-#         external_tables,
-#         types_check: bool,
-#         end_query: bool,
-#     ):
-#         super().__init__(context_key)
-#         super().set_template_render(template_render)
-
-#         self.external_tables = external_tables
-#         self.types_check = types_check
-#         self.end_query = end_query
-
-#     def __call__(self, context):
-#         self.render_template_fields(context)
-#         external_tables = self.external_tables
-#         types_check = self.types_check
-#         end_query = self.end_query
-
-#         cur: ClickhouseCursor = context[self.context_key]["cur"]
-#         client: ClickhouseClient = cur._client
-#         conn: ClickhouseConnection = client.get_connection()
-
-#         conn.send_external_tables(external_tables, types_check)
-
-#         if end_query:
-#             conn.send_data(RowOrientedBlock())
-
-
-# def ch_send_external_tables(
-#     external_tables: List[Dict[str, Any]],
-#     types_check: bool = False,
-#     end_query=True,
-# ):
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.before_modules.append(
-#             ClickhouseSendExternalTablesModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 external_tables,
-#                 types_check,
-#                 end_query,
-#             )
-#         )
-
-#         return builder
-
-#     return wrapper
-
-
-# class ClickhouseEndQueryModule(PipeTask):
-#     def __init__(
-#         self,
-#         context_key: str,
-#         template_render: Callable,
-#     ):
-#         super().__init__(context_key)
-#         super().set_template_render(template_render)
-
-#     def __call__(self, context):
-#         self.render_template_fields(context)
-#         cur: ClickhouseCursor = context[self.context_key]["cur"]
-#         client: ClickhouseClient = cur._client
-#         conn: ClickhouseConnection = client.get_connection()
-
-#         conn.send_data(RowOrientedBlock())
-
-
-# def ch_end_query():
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.before_modules.append(
-#             ClickhouseEndQueryModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#             )
-#         )
-
-#         return builder
-
-#     return wrapper
 
 
 class ClickhouseResultRowToStdoutModule(PipeTask):
@@ -964,8 +915,9 @@ class ClickhouseSaveToCsvModule(PipeTask):
             for row in cur:
                 if first:
                     first = False
-                    csv_header = map(lambda x: x[0], cur.columns_with_types)
-                    wrt.writerow(csv_header)
+                    if cur.columns_with_types is not None:
+                        csv_header = map(lambda x: x[0], cur.columns_with_types)
+                        wrt.writerow(csv_header)
 
                 wrt.writerow(row)
                 i += 1
@@ -1093,6 +1045,7 @@ class ClickhouseSaveToGZipCsvModule(PipeTask):
                 for row in cur:
                     if first:
                         first = False
+                    if cur.columns_with_types is not None:
                         csv_header = map(lambda x: x[0], cur.columns_with_types)
                         wrt.writerow(csv_header)
 
@@ -1118,8 +1071,6 @@ def ch_save_to_gzip_csv(
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
-    """ """
-
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
             ClickhouseSaveToGZipCsvModule(
@@ -1151,8 +1102,10 @@ class ClickhouseSaveToXComModule(PipeTask):
         self,
         context_key: str,
         template_render: Callable,
-        name: str,
-        func: Callable[[ClickhouseCursor, Any], Any],
+        save_to: str,
+        save_builder: Callable[[ClickhouseCursor], Any],
+        save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str,
+        jinja_render: bool,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -1161,40 +1114,60 @@ class ClickhouseSaveToXComModule(PipeTask):
 
         self.cur_key = cur_key
         self.ti_key = "ti"
-        self.name = name
-        self.func = func
+        self.save_to = save_to
+        self.save_builder = save_builder
+        self.save_if = save_if
+        self.jinja_render = jinja_render
 
     def __call__(self, context):
         self.render_template_fields(context)
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
 
-        res = self.func(cur, context)
-        res = self.template_render(res, context)
-        ti = context[self.ti_key]
+        res = self.save_builder(cur)
+        # выполняем рендер jinja, если нужно
+        if self.jinja_render and res is not None:
+            res = self.template_render(res, context)
+        
+        if self.save_if_eval(context, res, cur):
+            ti = context[self.ti_key]
+            ti.xcom_push(key=self.save_to, value=res)
 
-        ti.xcom_push(key=self.name, value=res)
+    def save_if_eval(self, context, res, cur):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res, cur)
+
+        return save_if
 
 
 def ch_save_to_xcom(
-    xcom_name: str,
-    xcom_gen: Callable[[ClickhouseCursor, Any], Any],
+    save_builder: Callable[[ClickhouseCursor], Any],
+    save_to: str = XCOM_RETURN_KEY,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
     Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
-    Для сохранения информации в xcom нужно передать:
-    - xcom_name - это имя xcom записи. Напомню, что по умолчанию имя в xcom используется "return_value".
-        Необходимо использовать любое другое имя, отличное от этого для передачи касомного xcom между задачами
-    - xcom_gen - это функция, которая будет использована для генерации значения.
-    xcom_gen принимает 1 параметр: ClickhouseCursor - текущий clickhouse cursor
-    xcom_gen должна возвращать то значение, которое можно сериализовать в xcom
 
-    @ch_save_to_xcom("myxcom", lambda cur, context: {
-        'source_row': 0,
-        'error_row': 0,
-    })
+    Args:
+        save_to: это имя xcom ключа
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в xcom
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_to_xcom("my_context_key", lambda cur: {
+                'target_row': cur.rowcount,
+                'source_row': {{ params.source_row }},
+                'error_row': 0,
+            })
     """
 
     def wrapper(builder: PipeTaskBuilder):
@@ -1202,8 +1175,10 @@ def ch_save_to_xcom(
             ClickhouseSaveToXComModule(
                 builder.context_key,
                 builder.template_render,
-                xcom_name,
-                xcom_gen,
+                save_to=save_to,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1218,8 +1193,10 @@ class ClickhouseSaveToContextModule(PipeTask):
         self,
         context_key: str,
         template_render: Callable,
-        name: str,
-        func: Callable[[ClickhouseCursor, Any], Any],
+        save_to: str,
+        save_builder: Callable[[ClickhouseCursor], Any],
+        save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str,
+        jinja_render: bool,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -1228,37 +1205,73 @@ class ClickhouseSaveToContextModule(PipeTask):
 
         self.cur_key = cur_key
         self.ti_key = "ti"
-        self.name = name
-        self.func = func
+        self.save_to = save_to
+        self.save_builder = save_builder
+        self.save_if = save_if
+        self.jinja_render = jinja_render
 
     def __call__(self, context):
         self.render_template_fields(context)
+
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
 
-        res = self.func(cur, context)
-        res = self.template_render(res, context)
-        context[self.name] = res
+        # выполняю проверку нужно ли сохранять результат в контекст
+        self.render_template_fields(context)
 
+        res = self.save_builder(cur)
+        # выполняем рендер jinja, если нужно
+        if self.jinja_render and res is not None:
+            res = self.template_render(res, context)
+        
+        if self.save_if_eval(context, res, cur):
+            context[self.save_to] = res
+
+    def save_if_eval(self, context, res, cur):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res, cur)
+
+        return save_if
+
+
+
+def ch_if_rows_exist(context, res, cur: ClickhouseCursor):
+    # rowcount содержит кол-во строк которые были затронуты в последнем execute запросе
+    # логика может быть не совсем верной, например когда выполнен update или delete
+    # но это позволяет не начинать чтение из курсора если результат пустой для select
+    # в остальных случаях просто не нужно использовать сохранение результата для update и delete операторов
+    if cur.rowcount > 0 and res is not None:
+        return True
+
+    return False
 
 def ch_save_to_context(
-    context_name: str,
-    context_gen: Callable[[ClickhouseCursor, Any], Any],
+    save_to: str,
+    save_builder: Callable[[ClickhouseCursor], Any],
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
     Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
-    Для сохранения информации в context нужно передать:
-    - context_name - это имя context ключа.
-    - context_gen - это функция, которая будет использована для генерации значения, которое будет добавлено в context
-    context_gen принимает 1 параметра: context
-    context_gen должна возвращать то значение, которое унжно сохранить в context
+    Args:
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        save_if: это функция, которая будет использована для проверки, нужно ли сохранять результат в context
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
-    @ch_save_to_context("my_context_key", lambda cur, context: {
-        'target_row': "{{ params.target_row }}",
-        'source_row': 0,
-        'error_row': 0,
-    })
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_to_context("my_context_key", lambda cur: {
+                'target_row': cur.rowcount,
+                'source_row': {{ params.source_row }},
+                'error_row': 0,
+            })
     """
 
     def wrapper(builder: PipeTaskBuilder):
@@ -1266,8 +1279,10 @@ def ch_save_to_context(
             ClickhouseSaveToContextModule(
                 builder.context_key,
                 builder.template_render,
-                context_name,
-                context_gen,
+                save_to=save_to,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1277,141 +1292,7 @@ def ch_save_to_context(
     return wrapper
 
 
-# class ClickhouseSendDataFromCsvModule(PipeTask):
-#     def __init__(
-#         self,
-#         context_key: str,
-#         template_render: Callable,
-#         file_path: str,
-#         delimiter: str,
-#         quotechar: Optional[str],
-#         escapechar: Optional[str],
-#         doublequote: bool,
-#         skipinitialspace: bool,
-#         lineterminator: str,
-#         quoting: int,
-#         strict: bool,
-#         encoding: str,
-#     ):
-#         super().__init__(context_key)
-#         super().set_template_fields(
-#             (
-#                 "file_path",
-#                 "delimiter",
-#                 "quotechar",
-#                 "escapechar",
-#                 "doublequote",
-#                 "skipinitialspace",
-#                 "quoting",
-#                 "strict",
-#                 "encoding",
-#             )
-#         )
-#         super().set_template_render(template_render)
-
-#         self.file_path = file_path
-#         self.delimiter = delimiter
-#         self.quotechar = quotechar
-#         self.escapechar = escapechar
-#         self.doublequote = doublequote
-#         self.skipinitialspace = skipinitialspace
-#         self.lineterminator = lineterminator
-#         self.quoting = quoting
-#         self.strict = strict
-#         self.encoding = encoding
-
-#     def receive_sample_block(self, conn: ClickhouseConnection):
-#         while True:
-#             packet = conn.receive_packet()
-
-#             if packet.type == ServerPacketTypes.DATA:
-#                 return packet.block
-
-#             elif packet.type == ServerPacketTypes.EXCEPTION:
-#                 raise packet.exception
-
-#             elif packet.type == ServerPacketTypes.LOG:
-#                 pass
-#                 # log_block(packet.block)
-
-#             elif packet.type == ServerPacketTypes.TABLE_COLUMNS:
-#                 pass
-
-#             else:
-#                 message = conn.unexpected_packet_message(
-#                     "Data, Exception, Log or TableColumns", packet.type
-#                 )
-#                 raise UnexpectedPacketFromServerError(message)
-
-#     def __call__(self, context):
-#         self.render_template_fields(context)
-
-#         cur: ClickhouseCursor = context[self.context_key]["cur"]
-#         client: ClickhouseClient = cur._client
-#         conn: ClickhouseConnection = client.get_connection()
-
-#         self.file_path = os.path.expandvars(self.file_path)
-#         file = Path(self.file_path).absolute()
-
-#         print(f"clickhouse read csv: {file} ...")
-
-#         with open(file, mode="r", encoding=self.encoding) as f:
-#             # Empty block, end of data transfer.
-#             # conn.send_data(RowOrientedBlock())
-
-#             sample_block = client.receive_sample_block()
-
-#             if sample_block:
-#                 for row in f.readlines():
-#                     if row != '\n':
-#                         block = RowOrientedBlock(
-#                             sample_block.columns_with_types, row, types_check=False
-#                         )
-
-#                         conn.send_data(block)
-#                         # client.send_data(sample_block, row, types_check=False, columnar=False)
-
-#             client.receive_end_of_insert_query()
-
-
-# def ch_send_data_from_csv(
-#     from_file: str,
-#     delimiter: str = ",",
-#     quotechar: str | None = '"',
-#     escapechar: str | None = None,
-#     doublequote: bool = True,
-#     skipinitialspace: bool = False,
-#     lineterminator: str = "\r\n",
-#     quoting: int = csv.QUOTE_MINIMAL,
-#     strict: bool = False,
-#     encoding: str = "utf-8",
-# ):
-#     """ """
-
-#     def wrapper(builder: PipeTaskBuilder):
-#         builder.before_modules.append(
-#             ClickhouseSendDataFromCsvModule(
-#                 builder.context_key,
-#                 builder.template_render,
-#                 from_file,
-#                 delimiter,
-#                 quotechar,
-#                 escapechar,
-#                 doublequote,
-#                 skipinitialspace,
-#                 lineterminator,
-#                 quoting,
-#                 strict,
-#                 encoding,
-#             )
-#         )
-
-#         return builder
-
-#     return wrapper
-
-
-class ClickhouseExecute(PipeTask):
+class ClickhouseExecuteModule(PipeTask):
     """
     Отправляет sql запрос в clickhouse
     """
@@ -1420,19 +1301,19 @@ class ClickhouseExecute(PipeTask):
         self,
         context_key: str,
         template_render: Callable,
-        query: str,
+        sql: str,
         params: Optional[Dict[str, Any]],
         external_tables: Optional[Dict],
         query_id: Optional[str],
         settings: Dict[str, Any],
         types_check: bool,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
         super().set_template_fields(
             (
-                "query",
+                "sql",
                 "query_id",
                 "params",
                 "settings",
@@ -1441,47 +1322,55 @@ class ClickhouseExecute(PipeTask):
         super().set_template_render(template_render)
 
         self.cur_key = cur_key
-        self.query = query
+        self.sql = sql
         self.params = params
         self.external_tables = external_tables
         self.query_id = query_id
         self.settings = settings
         self.types_check = types_check
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
 
-        query = self.query
+        sql = self.sql
         params = self.params
         external_tables = self.external_tables
         query_id = self.query_id
         settings = self.settings
         types_check = self.types_check
-        print_query = self.print_query
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
 
-        if query_id:
-            cur.set_query_id(query_id)
+        if self.execute_if_eval(context, cur):
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if settings:
-            cur.set_settings(settings)
+            if settings:
+                cur.set_settings(settings)
 
-        if types_check:
-            cur.set_types_check(types_check)
+            if types_check:
+                cur.set_types_check(types_check)
 
-        if external_tables:
-            cur.set_external_table(
-                name=external_tables["name"],
-                structure=external_tables["structure"],
-                data=external_tables["data"],
-            )
+            if external_tables:
+                cur.set_external_table(
+                    name=external_tables["name"],
+                    structure=external_tables["structure"],
+                    data=external_tables["data"],
+                )
 
-        if print_query:
-            print(query)
+            cur.execute(sql, params)
 
-        cur.execute(query, params)
+    def execute_if_eval(self, context, ch_cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, ch_cur)
+
+        return execute_if
 
 
 def ch_execute(
@@ -1491,7 +1380,7 @@ def ch_execute(
     query_id: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
     types_check=False,
-    print_query=False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1503,7 +1392,7 @@ def ch_execute(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ClickhouseExecute(
+            ClickhouseExecuteModule(
                 builder.context_key,
                 builder.template_render,
                 query,
@@ -1512,7 +1401,7 @@ def ch_execute(
                 query_id,
                 settings or {},
                 types_check,
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1523,7 +1412,7 @@ def ch_execute(
     return wrapper
 
 
-class ClickhouseExecuteIter(PipeTask):
+class ClickhouseExecuteModuleIter(PipeTask):
     """
     Отправляет sql запрос в clickhouse
     """
@@ -1538,7 +1427,7 @@ class ClickhouseExecuteIter(PipeTask):
         query_id: Optional[str],
         settings: Dict[str, Any],
         types_check: bool,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -1559,7 +1448,7 @@ class ClickhouseExecuteIter(PipeTask):
         self.query_id = query_id
         self.settings = settings
         self.types_check = types_check
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -1570,34 +1459,42 @@ class ClickhouseExecuteIter(PipeTask):
         query_id = self.query_id
         settings = self.settings
         types_check = self.types_check
-        print_query = self.print_query
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
 
-        if query_id:
-            cur.set_query_id(query_id)
+        if self.execute_if_eval(context, cur):
 
-        if settings:
-            cur.set_settings(settings)
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if types_check:
-            cur.set_types_check(types_check)
+            if settings:
+                cur.set_settings(settings)
 
-        if external_tables:
-            cur.set_external_table(
-                name=external_tables["name"],
-                structure=external_tables["structure"],
-                data=external_tables["data"],
-            )
+            if types_check:
+                cur.set_types_check(types_check)
 
-        # clickjhouse driver вызывает execite_iter только если передан cur.set_stream_results
-        cur.set_stream_results(True, settings.get("max_block_size") or 65536)
+            if external_tables:
+                cur.set_external_table(
+                    name=external_tables["name"],
+                    structure=external_tables["structure"],
+                    data=external_tables["data"],
+                )
 
-        if print_query:
-            print(query)
+            # clickjhouse driver вызывает execite_iter только если передан cur.set_stream_results
+            cur.set_stream_results(True, settings.get("max_block_size") or 65536)
 
-        cur.execute(query, params)
+            cur.execute(query, params)
 
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
+
+        return execute_if
 
 def ch_execute_iter(
     query: str,
@@ -1606,7 +1503,7 @@ def ch_execute_iter(
     query_id: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
     types_check=False,
-    print_query=False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1618,7 +1515,7 @@ def ch_execute_iter(
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
-            ClickhouseExecuteIter(
+            ClickhouseExecuteModuleIter(
                 builder.context_key,
                 builder.template_render,
                 query,
@@ -1627,7 +1524,7 @@ def ch_execute_iter(
                 query_id,
                 settings or {},
                 types_check,
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1650,7 +1547,7 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
         settings: Dict[str, Any],
         client_settings: Dict[str, Any],
         query_id: Optional[str],
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -1672,7 +1569,7 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
         self.client_settings = client_settings
         self.query_id = query_id
         self.query: str = ""
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -1682,33 +1579,41 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
         settings = self.settings
         client_settings = self.client_settings
         query_id = self.query_id
-        print_query = self.print_query
-
-        print(f"try rendering file: {sql_file}")
-        query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
-        query = self.template_render(query, context)
-        print(f"rendering success: {sql_file}")
-
+        
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
+            print(f"try rendering file: {sql_file}")
+            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = self.template_render(query, context)
+            print(f"rendering success: {sql_file}")
 
-        if query_id:
-            cur.set_query_id(query_id)
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        cur.set_types_check(False)
+            if settings:
+                cur.set_settings(settings)
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            if query_id:
+                cur.set_query_id(query_id)
 
-        if print_query:
-            print(query)
+            cur.set_types_check(False)
 
-        cur.execute(query, params)
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
+            cur.execute(query, params)
+    
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
+
+        return execute_if
 
 def ch_execute_file_query(
     sql_file: str,
@@ -1716,7 +1621,7 @@ def ch_execute_file_query(
     settings: Optional[Dict[str, Any]] = None,
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
-    print_query=False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1736,7 +1641,7 @@ def ch_execute_file_query(
                 settings or {},
                 client_settings or {},
                 query_id,
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1760,7 +1665,7 @@ class ClickhouseExecuteFileMultiStatementsModule(PipeTask):
         client_settings: Dict[str, Any],
         query_id: Optional[str],
         sep: str,
-        print_query: bool,
+        execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str,
         cur_key: str = ch_cur_key_default,
     ):
         super().__init__(context_key)
@@ -1783,7 +1688,7 @@ class ClickhouseExecuteFileMultiStatementsModule(PipeTask):
         self.client_settings = client_settings
         self.query_id = query_id
         self.sep = sep
-        self.print_query = print_query
+        self.execute_if = execute_if
 
     def __call__(self, context):
         self.render_template_fields(context)
@@ -1794,38 +1699,45 @@ class ClickhouseExecuteFileMultiStatementsModule(PipeTask):
         client_settings = self.client_settings
         query_id = self.query_id
         sep = self.sep
-        print_query = self.print_query
-
-        sql_file = os.path.expandvars(sql_file)
-        query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
-        query = self.template_render(query, context)
 
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
-        client: ClickhouseClient = cur._client
-        conn: ClickhouseConnection = client.get_connection()
 
-        if settings:
-            cur.set_settings(settings)
+        if self.execute_if_eval(context, cur):
 
-        if query_id:
-            cur.set_query_id(query_id)
+            sql_file = os.path.expandvars(sql_file)
+            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = self.template_render(query, context)
 
-        cur.set_types_check(False)
+            client: ClickhouseClient = cur._client
+            conn: ClickhouseConnection = client.get_connection()
 
-        if client_settings:
-            conn.context.client_settings |= client_settings
+            if settings:
+                cur.set_settings(settings)
 
-        for query_part in query.split(sep):
-            if not query_part:
-                continue
+            if query_id:
+                cur.set_query_id(query_id)
 
-            if print_query:
-                print(query_part)
+            cur.set_types_check(False)
 
-            cur.execute(query_part, params)
+            if client_settings:
+                conn.context.client_settings |= client_settings
 
-            if print_query:
-                print(f"recv rows: {cur.rowcount}")
+            for query_part in query.split(sep):
+                if not query_part:
+                    continue
+
+                cur.execute(query_part, params)
+    
+    def execute_if_eval(self, context, cur):
+        match self.execute_if:
+            case bool():
+                execute_if = self.execute_if
+            case str():
+                execute_if = self.template_render(self.execute_if, context)
+            case _:
+                execute_if = self.execute_if(context, cur)
+
+        return execute_if
 
 
 def ch_execute_file_queries(
@@ -1834,7 +1746,7 @@ def ch_execute_file_queries(
     settings: Optional[Dict[str, Any]] = None,
     client_settings: Optional[Dict[str, Any]] = None,
     query_id: Optional[str] = None,
-    print_query: bool = False,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
     cur_key=ch_cur_key_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
@@ -1856,7 +1768,7 @@ def ch_execute_file_queries(
                 client_settings or {},
                 query_id,
                 ";",
-                print_query,
+                execute_if,
                 cur_key=cur_key,
             ),
             pipe_stage,
@@ -1865,3 +1777,703 @@ def ch_execute_file_queries(
         return builder
 
     return wrapper
+
+
+def ch_check_table_exist(
+    schema: str,
+    table: str,
+    save_to: str,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql="""select
+    true
+from
+    information_schema.tables
+where 1=1
+    and table_schema in (%(ch_schema)s)
+    and table_name in (%(ch_table)s)
+""",
+                params={
+                    "ch_schema": schema,
+                    "ch_table": table,
+                },
+                external_tables=None,
+                query_id=None,
+                settings={},
+                types_check=False,
+                execute_if=True,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        def fetch_true_or_false(cur):
+            res = cur.fetchone()
+
+            if res is None:
+                return False
+
+            common_error = f"""ch_check_column_exist
+unexpected result. Expected true, false or None
+however result type is: {type(res)}
+value: {res}"""
+
+            if not isinstance(res, tuple):
+                raise RuntimeError(common_error)
+
+            if len(res) != 1 or len(res) > 1:
+                raise RuntimeError(common_error)
+            
+            res = res[0]
+
+            if not isinstance(res, bool):
+                raise RuntimeError(common_error)
+
+            return res
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=fetch_true_or_false,
+                save_if=save_if,
+                jinja_render=False,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def ch_check_column_exist(
+    schema: str,
+    table: str,
+    column: str,
+    save_to: str,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql="""select
+    true
+from
+    information_schema.columns
+where 1=1
+    and table_schema in (%(ch_schema)s)
+    and table_name in (%(ch_table)s)
+    and column_name in (%(ch_column)s)
+""",
+                params={
+                    "ch_schema": schema,
+                    "ch_table": table,
+                    "ch_column": column,
+                },
+                external_tables=None,
+                query_id=None,
+                settings={},
+                types_check=False,
+                execute_if=True,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        def fetch_true_or_false(cur):
+            res = cur.fetchone()
+
+            if res is None:
+                return False
+
+            common_error = f"""ch_check_column_exist
+unexpected result. Expected true, false or None
+however result type is: {type(res)}
+value: {res}"""
+
+            if not isinstance(res, tuple):
+                raise RuntimeError(common_error)
+
+            if len(res) != 1 or len(res) > 1:
+                raise RuntimeError(common_error)
+            
+            res = res[0]
+
+            if not isinstance(res, bool):
+                raise RuntimeError(common_error)
+
+            return res
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=fetch_true_or_false,
+                save_if=save_if,
+                jinja_render=False,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_fetchone_to_context(
+    save_to: str,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_result_to_context("my_context_key")
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_fetchall_to_context(
+    save_to: str,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_result_to_context("my_context_key")
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_fetchone_to_xcom(
+    save_to: str = XCOM_RETURN_KEY,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+
+    Args:
+        save_to: это имя xcom ключа
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_fetchone_to_xcom()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToXComModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_fetchall_to_xcom(
+    save_to: str = XCOM_RETURN_KEY,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+
+    Args:
+        save_to: это имя xcom ключа
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_result_to_xcom()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToXComModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_save_to_context(
+    sql: str,
+    save_to: str,
+    save_builder: Callable[[ClickhouseCursor], Any],
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_save_to_context(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_fetchone_to_context(
+    sql: str,
+    save_to: str,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_save_to_context(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_fetchall_to_context(
+    sql: str,
+    save_to: str,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_save_to_context(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_save_to_xcom(
+    sql: str,
+    save_builder: Callable[[ClickhouseCursor], Any],
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    save_to: str = XCOM_RETURN_KEY,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Xcom для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя xcom ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_save_to_xcom(
+                sql="select %(date)s", params={"date": pendulum.now()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        
+        builder.add_module(
+            ClickhouseSaveToXComModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def ch_execute_and_fetchone_to_xcom(
+    sql: str,
+    save_to: str = XCOM_RETURN_KEY,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Xcom для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя xcom ключа, по умолчанию 
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_result_to_xcom("my_context_key")
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToXComModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_fetchall_to_xcom(
+    sql: str,
+    save_to: str = XCOM_RETURN_KEY,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow XCom для последующего использования
+
+    Args:
+        save_to: это имя xcom ключа
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_result_to_xcom("my_context_key")
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id, 
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToXComModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
