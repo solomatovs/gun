@@ -482,7 +482,7 @@ class PostgresExecuteModule(PipeTask):
         self.render_template_fields(context)
 
         pg_cur: psycopg2.extensions.cursor = context[self.context_key][self.cur_key]
-        
+
         if self.execute_if_eval(context, pg_cur):
             pg_cur.execute(self.sql, self.params)
 
@@ -496,6 +496,7 @@ class PostgresExecuteModule(PipeTask):
                 execute_if = self.execute_if(context, pg_cur)
 
         return execute_if
+
 
 def pg_execute(
     sql: str,
@@ -824,18 +825,26 @@ class CopyFromPipeThread(threading.Thread):
         self.columns = columns
 
     def _set_search_path(self):
-        stmp = psycopg2.sql.SQL("set search_path = {}").format(
-            psycopg2.sql.Identifier(self.tgt_schema),
-        ).as_string(self.tgt_cursor)
-        
+        stmp = (
+            psycopg2.sql.SQL("set search_path = {}")
+            .format(
+                psycopg2.sql.Identifier(self.tgt_schema),
+            )
+            .as_string(self.tgt_cursor)
+        )
+
         self.tgt_cursor.execute(stmp)
 
     def _truncate_table_if_needed(self):
         if self.tgt_truncate:
-            stmp = psycopg2.sql.SQL("truncate table {}.{}").format(
-                psycopg2.sql.Identifier(self.tgt_schema),
-                psycopg2.sql.Identifier(self.tgt_table),
-            ).as_string(self.tgt_cursor)
+            stmp = (
+                psycopg2.sql.SQL("truncate table {}.{}")
+                .format(
+                    psycopg2.sql.Identifier(self.tgt_schema),
+                    psycopg2.sql.Identifier(self.tgt_table),
+                )
+                .as_string(self.tgt_cursor)
+            )
             print(stmp)
             self.tgt_cursor.execute(stmp)
 
@@ -917,10 +926,14 @@ class CopyToPipeThread(threading.Thread):
         self._reset_isolation_level = None
 
     def _set_search_path(self):
-        stmp = psycopg2.sql.SQL("set search_path = {}").format(
-            psycopg2.sql.Identifier(self.src_schema),
-        ).as_string(self.src_cursor)
-        
+        stmp = (
+            psycopg2.sql.SQL("set search_path = {}")
+            .format(
+                psycopg2.sql.Identifier(self.src_schema),
+            )
+            .as_string(self.src_cursor)
+        )
+
         self.src_cursor.execute(stmp)
 
     def before_copy(self):
@@ -1188,7 +1201,7 @@ class CopyExpertPipeThread(threading.Thread):
         if self.params is not None:
             self.query = self.cursor.mogrify(self.query, self.params)
             self.query = self.query.decode("utf-8")
-        
+
         self.cursor.copy_expert(self.query, self.read_f, self.size)
 
     def run(self):
@@ -1209,6 +1222,7 @@ class CopyExpertPipeThread(threading.Thread):
         if self.exc:
             raise self.exc
 
+
 class PostgresCopyExpertToPostgres:
     @staticmethod
     def execute(
@@ -1221,27 +1235,27 @@ class PostgresCopyExpertToPostgres:
         size: Optional[int] = None,
     ):
         if src_cursor is None:
-            raise RuntimeError(
-                f"""src postgres cursor was not passed"""
-            )
+            raise RuntimeError(f"""src postgres cursor was not passed""")
 
         if tgt_cursor is None:
-            raise RuntimeError(
-                f"""tgt postgres cursor was not passed"""
-            )
+            raise RuntimeError(f"""tgt postgres cursor was not passed""")
 
         if src_query is None or not isinstance(src_query, str):
-            raise RuntimeError(f"parameter 'src_query' incorrect type {type(src_query)}")
-        
+            raise RuntimeError(
+                f"parameter 'src_query' incorrect type {type(src_query)}"
+            )
+
         if tgt_query is None or not isinstance(tgt_query, str):
-            raise RuntimeError(f"parameter 'tgt_template' incorrect type {type(tgt_query)}")
+            raise RuntimeError(
+                f"parameter 'tgt_template' incorrect type {type(tgt_query)}"
+            )
 
         if size is None:
             size = 8192
 
         if not isinstance(size, int):
             raise RuntimeError(f"parameter 'size' incorrect type {type(size)}")
-        
+
         r_fd, w_fd = os.pipe()
 
         with ExitStack() as stack:
@@ -1290,7 +1304,7 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
         ```sql
         copy (select * from public.pgbench_history where tid > 4) to stdout
         ```
-    
+
     tgt_query: str
         ```sql
         copy public.pgbench_history (tid, aid) from stdin
@@ -1329,7 +1343,7 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
         ```sql
         copy (select * from public.pgbench_history where tid > 4) to stdout
         ```
-    
+
     tgt_query: str
         ```sql
         copy public.pgbench_history (tid, aid) from stdin
@@ -1390,7 +1404,7 @@ class PostgresCopyExpertToPostgresModule(PipeTask):
             self.tgt_params,
             size,
         )
-        
+
         print(f"src_cursor: {src_cursor.rowcount} rows")
         print(f"tgt_cursor: {tgt_cursor.rowcount} rows")
 
@@ -1426,6 +1440,7 @@ def pg_copy_to_pg_use_query(
         return builder
 
     return wrapper
+
 
 class PostgresCopyExpertToHandleModule(PipeTask):
     """Выполняет copy_expert в указанный handler, например sys.stdout
@@ -2147,7 +2162,7 @@ class PostgresSaveToXComModule(PipeTask):
         # выполняем рендер jinja, если нужно
         if self.jinja_render and res is not None:
             res = self.template_render(res, context)
-        
+
         if self.save_if_eval(context, res, pg_cur):
             ti = context[self.ti_key]
             ti.xcom_push(key=self.save_to, value=res)
@@ -2206,6 +2221,7 @@ def pg_save_to_xcom(
 
     return wrapper
 
+
 def pg_if_rows_exist(context, res, pg_cur: psycopg2.extensions.cursor):
     # rowcount содержит кол-во строк которые были затронуты в последнем execute запросе
     # логика может быть не совсем верной, например когда выполнен update или delete
@@ -2215,6 +2231,7 @@ def pg_if_rows_exist(context, res, pg_cur: psycopg2.extensions.cursor):
         return True
 
     return False
+
 
 def pg_fetchone_to_xcom(
     save_to: str = XCOM_RETURN_KEY,
@@ -2252,6 +2269,7 @@ def pg_fetchone_to_xcom(
 
     return wrapper
 
+
 def pg_fetchall_to_xcom(
     save_to: str = XCOM_RETURN_KEY,
     save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
@@ -2287,6 +2305,7 @@ def pg_fetchall_to_xcom(
         return builder
 
     return wrapper
+
 
 def pg_execute_and_save_to_xcom(
     sql: str,
@@ -2334,7 +2353,7 @@ def pg_execute_and_save_to_xcom(
             ),
             pipe_stage,
         )
-        
+
         builder.add_module(
             PostgresSaveToXComModule(
                 builder.context_key,
@@ -2367,7 +2386,7 @@ def pg_execute_and_fetchone_to_xcom(
 
     Args:
         sql: это sql запрос, который будет выполнен
-        save_to: это имя xcom ключа, по умолчанию 
+        save_to: это имя xcom ключа, по умолчанию
         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
     Examples:
@@ -2403,6 +2422,7 @@ def pg_execute_and_fetchone_to_xcom(
         return builder
 
     return wrapper
+
 
 def pg_execute_and_fetchall_to_xcom(
     sql: str,
@@ -2488,7 +2508,7 @@ class PostgresSaveToContextModule(PipeTask):
         # выполняем рендер jinja, если нужно
         if self.jinja_render and res is not None:
             res = self.template_render(res, context)
-        
+
         if self.save_if_eval(context, res, pg_cur):
             context[self.save_to] = res
 
@@ -2582,6 +2602,7 @@ def pg_fetchone_to_context(
 
     return wrapper
 
+
 def pg_fetchall_to_context(
     save_to: str,
     save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
@@ -2616,6 +2637,7 @@ def pg_fetchall_to_context(
         return builder
 
     return wrapper
+
 
 def pg_execute_and_save_to_context(
     sql: str,
@@ -2680,6 +2702,7 @@ def pg_execute_and_save_to_context(
 
     return wrapper
 
+
 def pg_execute_and_fetchone_to_context(
     sql: str,
     save_to: str,
@@ -2741,6 +2764,7 @@ def pg_execute_and_fetchone_to_context(
         return builder
 
     return wrapper
+
 
 def pg_execute_and_fetchall_to_context(
     sql: str,
@@ -3208,7 +3232,7 @@ value: {res}"""
 
             if len(res) != 1 or len(res) > 1:
                 raise RuntimeError(common_error)
-            
+
             res = res[0]
 
             if not isinstance(res, bool):
@@ -3299,7 +3323,7 @@ value: {res}"""
 
             if len(res) != 1 or len(res) > 1:
                 raise RuntimeError(common_error)
-            
+
             res = res[0]
 
             if not isinstance(res, bool):

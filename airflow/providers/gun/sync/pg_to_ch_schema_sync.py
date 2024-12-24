@@ -337,7 +337,7 @@ class PostgresToClickhouseSchemaCheck:
             override_schema=self.override_schema,
             exclude_columns=self.exclude_columns,
         )
-        
+
         return self.schema_check(
             src_cursor=src_cursor,
             src_schema=src_schema,
@@ -526,7 +526,7 @@ Its value: {}""".format(
             tgt_schema,
             tgt_table,
             src_table_check,
-           rule_columns,
+            rule_columns,
         )
 
     def check_equal_columns(
@@ -542,7 +542,7 @@ Its value: {}""".format(
         diff = list(diff)
 
         return diff
-    
+
     def check_equal_columns_text(
         self,
         src_schema,
@@ -817,7 +817,7 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
             self.log.info(
                 f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
             )
-            
+
             diff = self.check_equal_columns(
                 union_columns,
             )
@@ -825,11 +825,11 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
             return diff
         except RuntimeError as e:
             self.log.info(
-            f"""failed to load field info:
-{e}""")
+                f"""failed to load field info:
+{e}"""
+            )
             raise e
 
-        
 
 class PostgresToClickhouseSchemaSync:
     def __init__(
@@ -874,12 +874,12 @@ class PostgresToClickhouseSchemaSync:
         self.schema_checker = PostgresToClickhouseSchemaCheck(
             logger=self.log,
             src_cursor=self.src_cursor,
-            src_schema =self.src_schema,
-            src_table =self.src_table,
-            tgt_cursor =self.tgt_cursor,
-            tgt_schema =self.tgt_schema,
-            tgt_table =self.tgt_table,
-            src_table_check =self.src_table_check,
+            src_schema=self.src_schema,
+            src_table=self.src_table,
+            tgt_cursor=self.tgt_cursor,
+            tgt_schema=self.tgt_schema,
+            tgt_table=self.tgt_table,
+            src_table_check=self.src_table_check,
             rename_columns=self.rename_columns,
             override_schema=self.override_schema,
             exclude_columns=self.exclude_columns,
@@ -976,7 +976,7 @@ class PostgresToClickhouseSchemaSync:
 )
 engine ReplicatedMergeTree
 {ch_order_by}"""
-        
+
         if not isinstance(create_table_template, str):
             raise RuntimeError(
                 f"""'create_table_template' parameter must be str
@@ -1824,6 +1824,7 @@ engine ReplicatedMergeTree
 
     return wrapper
 
+
 class PostgresToClickhouseSchemaCheckModule(PipeTask):
     def __init__(
         self,
@@ -1931,7 +1932,6 @@ This can be done via 'pg_auth_airflow_conn'"""
         if self.save_if_eval(context, diff):
             context[self.save_to] = diff
 
-
     def save_if_eval(self, context, res: List):
         match self.save_if:
             case bool():
@@ -1942,7 +1942,6 @@ This can be done via 'pg_auth_airflow_conn'"""
                 save_if = self.save_if(context, res)
 
         return save_if
-
 
 
 def pg_to_ch_schema_check(

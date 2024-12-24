@@ -999,7 +999,8 @@ Probably an error occurred, manual debugging of the error is required"""
     ):
         _table_path = self._table_path_exp(database, table)
         _cluster = self._on_cluster_exp(cluster)
-        stmp = "truncate table {table_path} {cluster}".format(**{
+        stmp = "truncate table {table_path} {cluster}".format(
+            **{
                 "table_path": _table_path,
                 "cluster": _cluster,
             }

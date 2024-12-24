@@ -813,7 +813,7 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
             self.log.info(
                 f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
             )
-            
+
             diff = self.check_equal_columns(
                 union_columns,
             )
@@ -821,11 +821,11 @@ Please make sure of this manually, or disable the "src_table_check" parameter"""
             return diff
         except RuntimeError as e:
             self.log.info(
-            f"""failed to load field info:
-{e}""")
+                f"""failed to load field info:
+{e}"""
+            )
             raise e
-        
-        
+
 
 class PostgresToPostgresSchemaSync:
     def __init__(
@@ -865,12 +865,12 @@ class PostgresToPostgresSchemaSync:
         self.schema_checker = PostgresToPostgresSchemaCheck(
             logger=self.log,
             src_cursor=self.src_cursor,
-            src_schema =self.src_schema,
-            src_table =self.src_table,
-            tgt_cursor =self.tgt_cursor,
-            tgt_schema =self.tgt_schema,
-            tgt_table =self.tgt_table,
-            src_table_check =self.src_table_check,
+            src_schema=self.src_schema,
+            src_table=self.src_table,
+            tgt_cursor=self.tgt_cursor,
+            tgt_schema=self.tgt_schema,
+            tgt_table=self.tgt_table,
+            src_table_check=self.src_table_check,
             rename_columns=self.rename_columns,
             override_schema=self.override_schema,
             exclude_columns=self.exclude_columns,
@@ -1008,7 +1008,7 @@ create table {pg_table} ({pg_columns})
             create_table_template,
             rule_columns,
         )
-    
+
     def schema_sync(
         self,
         schema_strategy,
@@ -1505,7 +1505,7 @@ Please check the correctness of the parameter 'schema_strategy'"""
         # через union_columns получаю колонки tgt
         pg_info = map(lambda x: x.tgt, union_columns)
         pg_info = [x for x in pg_info if x is not None]
-        
+
         self.log.info(f'backup table: "{schema}"."{table}"')
         self.pg_man.pg_backup_table(
             cursor,
@@ -1840,7 +1840,6 @@ This can be done via 'pg_auth_airflow_conn'"""
         if self.save_if_eval(context, diff):
             context[self.save_to] = diff
 
-
     def save_if_eval(self, context, res: List):
         match self.save_if:
             case bool():
@@ -1851,6 +1850,7 @@ This can be done via 'pg_auth_airflow_conn'"""
                 save_if = self.save_if(context, res)
 
         return save_if
+
 
 def pg_to_pg_schema_check(
     src_schema: Optional[str],

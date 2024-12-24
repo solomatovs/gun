@@ -1,6 +1,5 @@
 import pendulum
-import logging
-from typing import Optional, Union, Callable, Any, Iterable, Sequence, Mapping
+from typing import Optional, Union, Callable
 from datetime import datetime
 
 from airflow.providers.gun.pipe import PipeTask, PipeTaskBuilder, PipeStage
@@ -20,11 +19,11 @@ class PeriodModel:
         self._period_from = period_from
         self._period_to = period_to
         self._description = description
-    
+
     @property
     def period_from(self):
         return self._period_from
-    
+
     @property
     def period_from_str(self):
         return self.period_from.to_iso8601_string()
@@ -32,11 +31,11 @@ class PeriodModel:
     @property
     def period_to(self):
         return self._period_to
-    
+
     @property
     def period_to_str(self):
         return self.period_to.to_iso8601_string()
-    
+
     @property
     def description(self):
         return self._description
@@ -47,6 +46,7 @@ description: {self.description}
 period_from: {self.period_from_str}
 period_to:   {self.period_to_str}
 --------"""
+
 
 class ShiftPeriodGeneratorModule(PipeTask):
     """Позволяет сгенерировать модель периода на основе сдвига {shift} и базовой даты {from_time}
@@ -66,6 +66,7 @@ class ShiftPeriodGeneratorModule(PipeTask):
             {"next_minute", "next_second", "next_hour", "next_day", "next_week", "next_month", "next_year"} - означает "примагнитить конец периода к началу указанного периода"
         from_time: базовая дата от которой будет сдвигаться период на указанные в shift, если не указано то берется 'now'
     """
+
     def __init__(
         self,
         context_key,
@@ -80,9 +81,7 @@ class ShiftPeriodGeneratorModule(PipeTask):
     ):
         super().__init__(context_key)
         super().set_template_fields(
-            (
-                "shift", "timezone", "start_of", "end_of", "from_time"
-            )
+            ("shift", "timezone", "start_of", "end_of", "from_time")
         )
         super().set_template_render(template_render)
 
@@ -125,7 +124,7 @@ class ShiftPeriodGeneratorModule(PipeTask):
                     self.start_of,
                     self.end_of,
                     self.from_time,
-                )
+                ),
             )
 
             context[self.save_to] = model
@@ -142,11 +141,13 @@ class ShiftPeriodGeneratorModule(PipeTask):
         return save_if
 
     def period_parser(self, shift_period):
-        shift, period = shift_period.split(' ')
+        shift, period = shift_period.split(" ")
         try:
             shift = int(shift)
         except ValueError:
-            raise ValueError(f"shift must be integer, but got {shift}. shift_period: {shift_period}")
+            raise ValueError(
+                f"shift must be integer, but got {shift}. shift_period: {shift_period}"
+            )
 
         period = str(period)
 
@@ -157,6 +158,7 @@ class ThisPeriodGeneratorModule(PipeTask):
     """Генерирует модель периода, который соответствует текущему времени
     Текущий месяц, текущий год, текущий день, текущий час, текущая минута, текущая секунда
     """
+
     def __init__(
         self,
         context_key,
@@ -168,11 +170,7 @@ class ThisPeriodGeneratorModule(PipeTask):
         save_to: str = save_to_default,
     ):
         super().__init__(context_key)
-        super().set_template_fields(
-            (
-                "period", "timezone", "from_time"
-            )
-        )
+        super().set_template_fields(("period", "timezone", "from_time"))
         super().set_template_render(template_render)
 
         self.save_to = save_to
@@ -206,13 +204,8 @@ class ThisPeriodGeneratorModule(PipeTask):
     start_of: {}
     end_of: {}
     from_time: {}""".format(
-                    shift,
-                    period,
-                    self.timezone,
-                    start_of,
-                    end_of,
-                    self.from_time
-                )
+                    shift, period, self.timezone, start_of, end_of, self.from_time
+                ),
             )
 
             context[self.save_to] = model
@@ -229,11 +222,13 @@ class ThisPeriodGeneratorModule(PipeTask):
         return save_if
 
     def period_parser(self, period):
-        res = period.split(' ')
+        res = period.split(" ")
         if len(res) > 1:
-            raise ValueError(f"period must be one of the following: {ShiftPeriodGenerator.PERIOD_TYPES}")
-        
-        return None, None, f'{period}', f'next_{period}'
+            raise ValueError(
+                f"period must be one of the following: {ShiftPeriodGenerator.PERIOD_TYPES}"
+            )
+
+        return None, None, f"{period}", f"next_{period}"
 
 
 class PrevPeriodGeneratorModule(PipeTask):
@@ -252,8 +247,9 @@ class PrevPeriodGeneratorModule(PipeTask):
         >>> PrevPeriodGeneratorModule('1 month'): 2024-01-01 00:00:00 - 2024-02-01 00:00:00
         ""
         ```
-    
+
     """
+
     def __init__(
         self,
         context_key,
@@ -265,11 +261,7 @@ class PrevPeriodGeneratorModule(PipeTask):
         save_to: str = save_to_default,
     ):
         super().__init__(context_key)
-        super().set_template_fields(
-            (
-                "shift", "timezone", "from_time"
-            )
-        )
+        super().set_template_fields(("shift", "timezone", "from_time"))
         super().set_template_render(template_render)
 
         self.save_to = save_to
@@ -309,7 +301,7 @@ class PrevPeriodGeneratorModule(PipeTask):
                     start_of,
                     end_of,
                     self.from_time,
-                )
+                ),
             )
 
             context[self.save_to] = model
@@ -326,21 +318,24 @@ class PrevPeriodGeneratorModule(PipeTask):
         return save_if
 
     def period_parser(self, shift_period):
-        shift, period = shift_period.split(' ')
+        shift, period = shift_period.split(" ")
         try:
             # так как клас должен генерировать предыдущие периоды, то shift должен быть отрицательным
             # здесь происходит принудительное исправление на отрицательное значение
             shift = abs(int(shift))
             shift = -shift
         except ValueError:
-            raise ValueError(f"shift must be integer, but got {shift}. original: {shift_period}")
+            raise ValueError(
+                f"shift must be integer, but got {shift}. original: {shift_period}"
+            )
 
         period = str(period)
 
-        start_of=period
-        end_of=period
+        start_of = period
+        end_of = period
 
         return shift, period, start_of, end_of
+
 
 class LastPeriodGeneratorModule(PipeTask):
     """Генерирует модель периода, который смещен назад на указанный диапазон
@@ -355,8 +350,9 @@ class LastPeriodGeneratorModule(PipeTask):
         Например можно сгенерировать предыдущий месяц начало и окончания которого примагничены к началу и концу месяца
         если now -> 2024-02-05 12:00:00, то
         >>> LastPeriodGeneratorModule('1 month'): 2024-02-05 12:00:00 - 2024-01-05 12:00:00
-    
+
     """
+
     def __init__(
         self,
         context_key,
@@ -371,9 +367,7 @@ class LastPeriodGeneratorModule(PipeTask):
     ):
         super().__init__(context_key)
         super().set_template_fields(
-            (
-                "shift", "start_of", "end_of", "timezone", "from_time"
-            )
+            ("shift", "start_of", "end_of", "timezone", "from_time")
         )
         super().set_template_render(template_render)
 
@@ -389,7 +383,9 @@ class LastPeriodGeneratorModule(PipeTask):
         if self.save_if_eval(context):
             self.render_template_fields(context)
 
-            shift, period, start_of, end_of = self.period_parser(self.shift, self.start_of, self.end_of)
+            shift, period, start_of, end_of = self.period_parser(
+                self.shift, self.start_of, self.end_of
+            )
 
             gen = ShiftPeriodGenerator(
                 shift=shift,
@@ -416,7 +412,7 @@ class LastPeriodGeneratorModule(PipeTask):
                     start_of,
                     end_of,
                     self.from_time,
-                )
+                ),
             )
 
             context[self.save_to] = model
@@ -433,18 +429,21 @@ class LastPeriodGeneratorModule(PipeTask):
         return save_if
 
     def period_parser(self, shift_period, start_of, end_of):
-        shift, period = shift_period.split(' ')
+        shift, period = shift_period.split(" ")
         try:
             # так как клас должен генерировать предыдущие периоды, то shift должен быть отрицательным
             # здесь происходит принудительное исправление на отрицательное значение
             shift = abs(int(shift))
             shift = -shift
         except ValueError:
-            raise ValueError(f"shift must be integer, but got {shift}. original: {shift_period}")
+            raise ValueError(
+                f"shift must be integer, but got {shift}. original: {shift_period}"
+            )
 
         period = str(period)
 
         return shift, period, start_of, end_of
+
 
 class CustomPeriodGeneratorModule(PipeTask):
     """Генерирует модель периода из указанных дат
@@ -462,6 +461,7 @@ class CustomPeriodGeneratorModule(PipeTask):
         pendulum.DateTime - можно указать объект pendulum.DateTime
         datetime.datetime - можно указать объект datetime.datetime
     """
+
     def __init__(
         self,
         context_key,
@@ -473,11 +473,7 @@ class CustomPeriodGeneratorModule(PipeTask):
         save_to: str = save_to_default,
     ):
         super().__init__(context_key)
-        super().set_template_fields(
-            (
-                "from_time", "to_time", "timezone"
-            )
-        )
+        super().set_template_fields(("from_time", "to_time", "timezone"))
         super().set_template_render(template_render)
 
         self.from_time = from_time
@@ -501,7 +497,7 @@ class CustomPeriodGeneratorModule(PipeTask):
     to_time: {}""".format(
                     from_time,
                     to_time,
-                )
+                ),
             )
 
             context[self.save_to] = model
@@ -517,12 +513,15 @@ class CustomPeriodGeneratorModule(PipeTask):
 
         return save_if
 
-
-    def _validate_datetime(self, from_point: Optional[Union[str, datetime, pendulum.DateTime]], timezone: str):
+    def _validate_datetime(
+        self,
+        from_point: Optional[Union[str, datetime, pendulum.DateTime]],
+        timezone: str,
+    ):
         match from_point:
             case None:
                 dt = pendulum.now(timezone)
-            case 'now':
+            case "now":
                 dt = pendulum.now(timezone)
             case str():
                 try:
@@ -562,19 +561,20 @@ class CustomPeriodGeneratorModule(PipeTask):
                 f"Example valid datetime: '2023-01-01 00:00:00'"
             )
 
+
 def period_shift(
     shift: Optional[str] = None,
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[Union[str, datetime, pendulum.DateTime]] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[Union[str, datetime, pendulum.DateTime]] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
 ):
     """
     Генерирует период на основе переданных параметров
-    
+
     Args:
         shift: различные варианты сдвига, например: -1 month, -1 week, -1 day, -1 hour, -1 minute, -1 second, -1 microsecond
         timezone: Часовой пояс
@@ -593,17 +593,17 @@ def period_shift(
         >>> @period_shift(
                 shift='-30 second',
             )
-            
+
             Последние 15 минут
         >>> @period_shift(
                 shift='-15 minute',
             )
-            
+
             Последние 6 часов
         >>> @period_shift(
                 shift='-6 hour',
             )
-            
+
             Текущий месяц
         >>> @period_shift(
                 start_of='month',
@@ -668,7 +668,7 @@ def period_shift(
                 start_of='year',
                 end_of='year',
             )
-"""
+    """
 
     def wrapper(builder: PipeTaskBuilder):
         builder.add_module(
@@ -693,8 +693,8 @@ def period_shift(
 
 def period_this(
     period: str,
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -720,10 +720,10 @@ def period_this(
 
 def period_last(
     shift: str,
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -748,10 +748,11 @@ def period_last(
 
     return wrapper
 
+
 def period_prev(
     shift: str,
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -774,10 +775,11 @@ def period_prev(
 
     return wrapper
 
+
 def period_custom(
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
-    to_time: Optional[str | datetime | pendulum.DateTime] = 'now',
-    timezone: str = 'Europe/Moscow',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
+    to_time: Optional[str | datetime | pendulum.DateTime] = "now",
+    timezone: str = "Europe/Moscow",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -800,9 +802,10 @@ def period_custom(
 
     return wrapper
 
+
 def period_this_minute(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -812,7 +815,7 @@ def period_this_minute(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='minute',
+                period="minute",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -827,8 +830,8 @@ def period_this_minute(
 
 
 def period_prev_minute(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -838,7 +841,7 @@ def period_prev_minute(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='-1 minute',
+                shift="-1 minute",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -851,10 +854,11 @@ def period_prev_minute(
 
     return wrapper
 
+
 def period_prev_minutes(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -864,7 +868,7 @@ def period_prev_minutes(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} minute',
+                shift=f"{shift} minute",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -879,10 +883,10 @@ def period_prev_minutes(
 
 
 def period_last_minute(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -892,7 +896,7 @@ def period_last_minute(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 minute',
+                shift="1 minute",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -906,13 +910,14 @@ def period_last_minute(
         return builder
 
     return wrapper
+
 
 def period_last_minutes(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -922,7 +927,7 @@ def period_last_minutes(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} minute',
+                shift=f"{shift} minute",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -937,9 +942,10 @@ def period_last_minutes(
 
     return wrapper
 
+
 def period_this_hour(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -949,7 +955,7 @@ def period_this_hour(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='hour',
+                period="hour",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -964,8 +970,8 @@ def period_this_hour(
 
 
 def period_prev_hour(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -975,7 +981,7 @@ def period_prev_hour(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 hour',
+                shift="1 hour",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -988,10 +994,11 @@ def period_prev_hour(
 
     return wrapper
 
+
 def period_prev_hours(
     shift: int | str = 1,
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1001,7 +1008,7 @@ def period_prev_hours(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} hour',
+                shift=f"{shift} hour",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1016,10 +1023,10 @@ def period_prev_hours(
 
 
 def period_last_hour(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1029,7 +1036,7 @@ def period_last_hour(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 hour',
+                shift="1 hour",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1043,13 +1050,14 @@ def period_last_hour(
         return builder
 
     return wrapper
+
 
 def period_last_hours(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1059,7 +1067,7 @@ def period_last_hours(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} hour',
+                shift=f"{shift} hour",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1073,10 +1081,11 @@ def period_last_hours(
         return builder
 
     return wrapper
+
 
 def period_this_day(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1086,7 +1095,7 @@ def period_this_day(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='day',
+                period="day",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1098,10 +1107,11 @@ def period_this_day(
         return builder
 
     return wrapper
+
 
 def period_prev_day(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1111,7 +1121,7 @@ def period_prev_day(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 day',
+                shift="1 day",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1123,11 +1133,12 @@ def period_prev_day(
         return builder
 
     return wrapper
+
 
 def period_prev_days(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1137,7 +1148,7 @@ def period_prev_days(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} day',
+                shift=f"{shift} day",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1149,12 +1160,13 @@ def period_prev_days(
         return builder
 
     return wrapper
+
 
 def period_last_day(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1164,7 +1176,7 @@ def period_last_day(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 day',
+                shift="1 day",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1178,13 +1190,14 @@ def period_last_day(
         return builder
 
     return wrapper
+
 
 def period_last_days(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1194,7 +1207,7 @@ def period_last_days(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} day',
+                shift=f"{shift} day",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1209,9 +1222,10 @@ def period_last_days(
 
     return wrapper
 
+
 def period_this_week(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1221,7 +1235,7 @@ def period_this_week(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='week',
+                period="week",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1234,9 +1248,10 @@ def period_this_week(
 
     return wrapper
 
+
 def period_prev_week(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1246,7 +1261,7 @@ def period_prev_week(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 week',
+                shift="1 week",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1261,9 +1276,9 @@ def period_prev_week(
 
 
 def period_prev_weeks(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1273,7 +1288,7 @@ def period_prev_weeks(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} week',
+                shift=f"{shift} week",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1285,12 +1300,13 @@ def period_prev_weeks(
         return builder
 
     return wrapper
+
 
 def period_last_week(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1300,7 +1316,7 @@ def period_last_week(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 week',
+                shift="1 week",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1314,13 +1330,14 @@ def period_last_week(
         return builder
 
     return wrapper
+
 
 def period_last_weeks(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1330,7 +1347,7 @@ def period_last_weeks(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} week',
+                shift=f"{shift} week",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1345,9 +1362,10 @@ def period_last_weeks(
 
     return wrapper
 
+
 def period_this_month(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1357,7 +1375,7 @@ def period_this_month(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='month',
+                period="month",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1369,10 +1387,11 @@ def period_this_month(
         return builder
 
     return wrapper
+
 
 def period_prev_month(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1382,7 +1401,7 @@ def period_prev_month(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 month',
+                shift="1 month",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1395,10 +1414,11 @@ def period_prev_month(
 
     return wrapper
 
+
 def period_prev_months(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1408,7 +1428,7 @@ def period_prev_months(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} month',
+                shift=f"{shift} month",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1423,10 +1443,10 @@ def period_prev_months(
 
 
 def period_last_month(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1436,7 +1456,7 @@ def period_last_month(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 month',
+                shift="1 month",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1451,12 +1471,13 @@ def period_last_month(
 
     return wrapper
 
+
 def period_last_months(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1466,7 +1487,7 @@ def period_last_months(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} month',
+                shift=f"{shift} month",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1483,8 +1504,8 @@ def period_last_months(
 
 
 def period_this_year(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1494,7 +1515,7 @@ def period_this_year(
             ThisPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                period='year',
+                period="year",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1509,8 +1530,8 @@ def period_this_year(
 
 
 def period_prev_year(
-    timezone: str = 'Europe/Moscow',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1520,7 +1541,7 @@ def period_prev_year(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 year',
+                shift="1 year",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1533,10 +1554,11 @@ def period_prev_year(
 
     return wrapper
 
+
 def period_prev_years(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1546,7 +1568,7 @@ def period_prev_years(
             PrevPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} year',
+                shift=f"{shift} year",
                 timezone=timezone,
                 from_time=from_time,
                 save_if=save_if,
@@ -1561,10 +1583,10 @@ def period_prev_years(
 
 
 def period_last_year(
-    timezone: str = 'Europe/Moscow',
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    timezone: str = "Europe/Moscow",
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1574,7 +1596,7 @@ def period_last_year(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift='1 year',
+                shift="1 year",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,
@@ -1589,12 +1611,13 @@ def period_last_year(
 
     return wrapper
 
+
 def period_last_years(
-    timezone: str = 'Europe/Moscow',
+    timezone: str = "Europe/Moscow",
     shift: int | str = 1,
-    start_of: str = 'cur',
-    end_of: str = 'cur',
-    from_time: Optional[str | datetime | pendulum.DateTime] = 'now',
+    start_of: str = "cur",
+    end_of: str = "cur",
+    from_time: Optional[str | datetime | pendulum.DateTime] = "now",
     save_if: Callable[[], bool] | bool | str = True,
     save_to: str = save_to_default,
     pipe_stage: Optional[PipeStage] = None,
@@ -1604,7 +1627,7 @@ def period_last_years(
             LastPeriodGeneratorModule(
                 builder.context_key,
                 builder.template_render,
-                shift=f'{shift} year',
+                shift=f"{shift} year",
                 timezone=timezone,
                 start_of=start_of,
                 end_of=end_of,

@@ -20,6 +20,7 @@ __all__ = [
     "cx_render_result",
 ]
 
+
 class ContextSaveModule(PipeTask):
     def __init__(
         self,
@@ -47,10 +48,10 @@ class ContextSaveModule(PipeTask):
             res = self.template_render(self.save_object, context)
         else:
             res = self.save_object
-        
+
         if self.save_if_eval(context, res):
             context[self.save_to] = res
-    
+
     def save_if_eval(self, context, res):
         match self.save_if:
             case bool():
@@ -107,13 +108,14 @@ def cx_save(
 
     return wrapper
 
+
 def not_none_or_undifined(context, res):
     if res is None:
         return False
 
     if isinstance(res, StrictUndefined):
         return False
-    
+
     return True
 
 
@@ -233,7 +235,7 @@ class ContextSaveToXcomModule(PipeTask):
         if self.save_if_eval(context, res):
             ti: TaskInstance = context[self.ti_key]
             res = ti.xcom_push(key=self.save_to, value=res)
-    
+
     def save_if_eval(self, context, res):
         match self.save_if:
             case bool():
@@ -244,7 +246,6 @@ class ContextSaveToXcomModule(PipeTask):
                 save_if = self.save_if(context, res)
 
         return save_if
-
 
 
 def cx_save_to_xcom(
@@ -343,6 +344,8 @@ class ContextPrintModule(PipeTask):
                 save_if = self.print_if(context, res)
 
         return save_if
+
+
 def cx_print(
     jinja_template: Any | str,
     print_if: Callable[[Any, Any], bool] | bool | str = True,
@@ -397,7 +400,7 @@ class ContextPrintResultModule(PipeTask):
     def __call__(self, context):
         self.render_template_fields(context)
         logger = logging.getLogger(self.__class__.__name__)
-        
+
         logger.info(f">>> print: return value")
         res = context[self.task_result_key]
 
@@ -417,6 +420,7 @@ class ContextPrintResultModule(PipeTask):
                 save_if = self.print_if(context, res)
 
         return save_if
+
 
 def cx_print_result(
     jinja_render: bool = True,
@@ -449,6 +453,7 @@ def cx_print_result(
 
     return wrapper
 
+
 class ContextRenderResultModule(PipeTask):
     def __init__(
         self,
@@ -463,10 +468,11 @@ class ContextRenderResultModule(PipeTask):
 
     def __call__(self, context):
         self.render_template_fields(context)
-        
+
         res = context[self.task_result_key]
         res = self.template_render(res, context)
         context[self.task_result_key] = res
+
 
 def cx_render_result(
     pipe_stage: Optional[PipeStage] = None,
@@ -497,6 +503,7 @@ def cx_render_result(
         return builder
 
     return wrapper
+
 
 class ContextPrintXComModule(PipeTask):
     def __init__(
@@ -531,7 +538,7 @@ class ContextPrintXComModule(PipeTask):
             logger = logging.getLogger(self.__class__.__name__)
             logger.info(f">>> print xcom {self.task_ids}.{self.xcom_key}:")
             PrintComplexObject(res)(logger)
-    
+
     def print_if_eval(self, context, res):
         match self.print_if:
             case bool():
@@ -542,6 +549,7 @@ class ContextPrintXComModule(PipeTask):
                 save_if = self.print_if(context, res)
 
         return save_if
+
 
 def cx_print_xcom(
     task_ids: str | Iterable[str],
@@ -594,7 +602,7 @@ if __name__ == "__main__":
     @dag(
         dag_id=f"{Path(__file__).stem}",
         schedule=None,
-        render_template_as_native_obj=True
+        render_template_as_native_obj=True,
     )
     def gen_dag():
 
@@ -655,7 +663,7 @@ if __name__ == "__main__":
         @pipe(pipe_stage=PipeStage.After)
         def cx_save_if_not_none_test():
             return {"my_key": "my_key"}
-        
+
         _ = (
             cx_save_without_jinja_render_test()
             >> cx_save_with_jinja_render_test()

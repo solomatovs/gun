@@ -397,10 +397,7 @@ class PostgresManipulator:
         else:
             _table_path = (
                 psycopg2.sql.SQL("{}.{}")
-                .format(
-                    psycopg2.sql.Identifier(schema),
-                    psycopg2.sql.Identifier(table)
-                )
+                .format(psycopg2.sql.Identifier(schema), psycopg2.sql.Identifier(table))
                 .as_string(cursor)
             )
 
@@ -764,13 +761,13 @@ alter table {pg_schema_back}.{pg_table} rename to {pg_table_back};"""
     ):
         _table_path = self._table_path_exp(cursor, schema, table)
 
-        stmp = "truncate table {table_path}".format(**{
+        stmp = "truncate table {table_path}".format(
+            **{
                 "table_path": _table_path,
             }
         )
 
         cursor.execute(stmp)
-
 
     def pg_delete_all_from_table(
         self,
@@ -784,16 +781,21 @@ delete from {table_path} as {alias}
         del_alias = "d"
 
         _table_path = self._table_path_exp(cursor, schema, table)
-        _alias = psycopg2.sql.SQL("{}").format(
-            psycopg2.sql.Identifier(del_alias),
-        ).as_string(cursor)
+        _alias = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(del_alias),
+            )
+            .as_string(cursor)
+        )
 
-        stmp = tmpl.format(**{
+        stmp = tmpl.format(
+            **{
                 "table_path": _table_path,
                 "alias": _alias,
             }
         )
-        
+
         cursor.execute(stmp)
 
     def pg_delete_period_from_table(
@@ -822,22 +824,30 @@ where 1=1
             )
             .as_string(cursor)
         )
-        _alias = psycopg2.sql.SQL("{}").format(
-            psycopg2.sql.Identifier(del_alias),
-        ).as_string(cursor)
+        _alias = (
+            psycopg2.sql.SQL("{}")
+            .format(
+                psycopg2.sql.Identifier(del_alias),
+            )
+            .as_string(cursor)
+        )
 
-        stmp = tmpl.format(**{
+        stmp = tmpl.format(
+            **{
                 "table_path": _table_path,
                 "field": _field,
                 "alias": _alias,
             }
         )
 
-        stmp = cursor.mogrify(stmp, {
-            "period_from": period_from,
-            "period_to": period_to,
-        }).decode(encoding='utf-8', errors='strict')
-        
+        stmp = cursor.mogrify(
+            stmp,
+            {
+                "period_from": period_from,
+                "period_to": period_to,
+            },
+        ).decode(encoding="utf-8", errors="strict")
+
         cursor.execute(stmp)
 
     def pg_delete_from_column_another_table_in_one_postgres(
@@ -864,14 +874,14 @@ where 1=1
         _select_path = self._table_path_exp(cursor, select_schema, select_table)
 
         _delete_alias = (
-             psycopg2.sql.SQL("{}")
+            psycopg2.sql.SQL("{}")
             .format(
                 psycopg2.sql.Identifier(delete_alias),
             )
             .as_string(cursor)
         )
         _select_alias = (
-             psycopg2.sql.SQL("{}")
+            psycopg2.sql.SQL("{}")
             .format(
                 psycopg2.sql.Identifier(select_alias),
             )
@@ -895,7 +905,8 @@ where 1=1
             .as_string(cursor)
         )
 
-        stmp = tmpl.format(**{
+        stmp = tmpl.format(
+            **{
                 "delete_path": _delete_path,
                 "select_path": _select_path,
                 "delete_alias": _delete_alias,
@@ -904,10 +915,8 @@ where 1=1
                 "select_field": _select_field,
             }
         )
-        
+
         cursor.execute(stmp)
-
-
 
     def pg_transfer_one_column_between_two_postgres(
         self,
@@ -924,7 +933,7 @@ where 1=1
         _insert_field = (
             psycopg2.sql.SQL("{}")
             .format(
-                psycopg2.sql.Identifier(insert_field ),
+                psycopg2.sql.Identifier(insert_field),
             )
             .as_string(insert_cursor)
         )
@@ -936,12 +945,12 @@ where 1=1
                 "insert_field": _insert_field,
             }
         )
-        
+
         _select_table = self._table_path_exp(select_cursor, select_schema, select_table)
         _select_field = (
             psycopg2.sql.SQL("{}")
             .format(
-                psycopg2.sql.Identifier(select_field ),
+                psycopg2.sql.Identifier(select_field),
             )
             .as_string(select_cursor)
         )
@@ -958,7 +967,6 @@ from
         )
 
         return copy_from_stmp, copy_to_stmp
-
 
     def pg_insert_select_in_one_postgres(
         self,
@@ -986,7 +994,9 @@ from
         _select_fields = ",\n".join(select_fields)
         if select_where is not None:
             _select_where = """where 1=1
-{}""".format(select_where)
+{}""".format(
+                select_where
+            )
         else:
             _select_where = ""
 
@@ -1018,7 +1028,6 @@ from
         )
 
         return stmp
-
 
     def pg_insert_select_between_two_postgres(
         self,
@@ -1055,7 +1064,9 @@ from
 
         if select_where is not None:
             _select_where = """where 1=1
-{}""".format(select_where)
+{}""".format(
+                select_where
+            )
         else:
             _select_where = ""
 
@@ -1084,7 +1095,6 @@ from
         )
 
         return copy_from_stmp, copy_to_stmp
-
 
     def pg_insert_select_period_in_one_postgres(
         self,
@@ -1129,7 +1139,6 @@ from
             .as_string(cursor)
         )
 
-
         stmp = """insert into {insert_table} (
 {insert_fields}
 )
@@ -1151,13 +1160,15 @@ where 1=1
             }
         )
 
-        stmp = cursor.mogrify(stmp, {
-            "period_from": where_period_from,
-            "period_to": where_period_to,
-        }).decode(encoding='utf-8', errors='strict')
+        stmp = cursor.mogrify(
+            stmp,
+            {
+                "period_from": where_period_from,
+                "period_to": where_period_to,
+            },
+        ).decode(encoding="utf-8", errors="strict")
 
         return stmp
-
 
     def pg_insert_select_period_between_two_postgres(
         self,
@@ -1228,9 +1239,12 @@ where 1=1
             }
         )
 
-        copy_from_stmp = select_cursor.mogrify(copy_from_stmp, {
-            "period_from": where_period_from,
-            "period_to": where_period_to,
-        }).decode(encoding='utf-8', errors='strict')
+        copy_from_stmp = select_cursor.mogrify(
+            copy_from_stmp,
+            {
+                "period_from": where_period_from,
+                "period_to": where_period_to,
+            },
+        ).decode(encoding="utf-8", errors="strict")
 
         return copy_from_stmp, copy_to_stmp

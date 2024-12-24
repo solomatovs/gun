@@ -205,7 +205,7 @@ class PipeAirflowTaskBuilder(PipeTaskBuilder):
                 module(context)
 
             res_decor = context[self.task_result_key]
-            
+
             return res_decor
 
 

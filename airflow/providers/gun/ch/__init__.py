@@ -331,6 +331,7 @@ class ClickhouseSendQueryModule(PipeTask):
 
         return execute_if
 
+
 def ch_send_query(
     query: str,
     params: Optional[Dict[str, Any]] = None,
@@ -452,6 +453,7 @@ class ClickhouseSendQueryMultiStatementsModule(PipeTask):
 
         return execute_if
 
+
 def ch_send_queries(
     query: str,
     params: Optional[Dict[str, Any]] = None,
@@ -543,7 +545,9 @@ class ClickhouseSendQueryFileModule(PipeTask):
 
         if self.execute_if_eval(context, cur):
             print(f"try rendering file: {sql_file}")
-            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = (
+                Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            )
             query = self.template_render(query, context)
             print(f"rendering success: {sql_file}")
 
@@ -566,7 +570,7 @@ class ClickhouseSendQueryFileModule(PipeTask):
                 conn.send_data(ColumnOrientedBlock())
             else:
                 cur.execute(query, params)
-    
+
     def execute_if_eval(self, context, cur):
         match self.execute_if:
             case bool():
@@ -577,6 +581,7 @@ class ClickhouseSendQueryFileModule(PipeTask):
                 execute_if = self.execute_if(context, cur)
 
         return execute_if
+
 
 def ch_send_file_query(
     sql_file: str,
@@ -674,7 +679,7 @@ class ClickhouseSendQueryFileMultiStatementsModule(PipeTask):
 
             query = sql_file.read_text(encoding="utf-8", errors="ignore")
             query = self.template_render(query, context)
-            
+
             client: ClickhouseClient = cur._client
             conn: ClickhouseConnection = client.get_connection()
 
@@ -705,6 +710,7 @@ class ClickhouseSendQueryFileMultiStatementsModule(PipeTask):
                 execute_if = self.execute_if(context, cur)
 
         return execute_if
+
 
 def ch_send_file_queries(
     sql_file: str,
@@ -1128,7 +1134,7 @@ class ClickhouseSaveToXComModule(PipeTask):
         # выполняем рендер jinja, если нужно
         if self.jinja_render and res is not None:
             res = self.template_render(res, context)
-        
+
         if self.save_if_eval(context, res, cur):
             ti = context[self.ti_key]
             ti.xcom_push(key=self.save_to, value=res)
@@ -1222,7 +1228,7 @@ class ClickhouseSaveToContextModule(PipeTask):
         # выполняем рендер jinja, если нужно
         if self.jinja_render and res is not None:
             res = self.template_render(res, context)
-        
+
         if self.save_if_eval(context, res, cur):
             context[self.save_to] = res
 
@@ -1238,7 +1244,6 @@ class ClickhouseSaveToContextModule(PipeTask):
         return save_if
 
 
-
 def ch_if_rows_exist(context, res, cur: ClickhouseCursor):
     # rowcount содержит кол-во строк которые были затронуты в последнем execute запросе
     # логика может быть не совсем верной, например когда выполнен update или delete
@@ -1248,6 +1253,7 @@ def ch_if_rows_exist(context, res, cur: ClickhouseCursor):
         return True
 
     return False
+
 
 def ch_save_to_context(
     save_to: str,
@@ -1496,6 +1502,7 @@ class ClickhouseExecuteModuleIter(PipeTask):
 
         return execute_if
 
+
 def ch_execute_iter(
     query: str,
     params: Optional[Dict[str, Any]] = None,
@@ -1579,12 +1586,14 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
         settings = self.settings
         client_settings = self.client_settings
         query_id = self.query_id
-        
+
         cur: ClickhouseCursor = context[self.context_key][self.cur_key]
 
         if self.execute_if_eval(context, cur):
             print(f"try rendering file: {sql_file}")
-            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = (
+                Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            )
             query = self.template_render(query, context)
             print(f"rendering success: {sql_file}")
 
@@ -1603,7 +1612,7 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
                 conn.context.client_settings |= client_settings
 
             cur.execute(query, params)
-    
+
     def execute_if_eval(self, context, cur):
         match self.execute_if:
             case bool():
@@ -1614,6 +1623,7 @@ class ClickhouseExecuteQueryFileModule(PipeTask):
                 execute_if = self.execute_if(context, cur)
 
         return execute_if
+
 
 def ch_execute_file_query(
     sql_file: str,
@@ -1705,7 +1715,9 @@ class ClickhouseExecuteFileMultiStatementsModule(PipeTask):
         if self.execute_if_eval(context, cur):
 
             sql_file = os.path.expandvars(sql_file)
-            query = Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            query = (
+                Path(sql_file).absolute().read_text(encoding="utf-8", errors="ignore")
+            )
             query = self.template_render(query, context)
 
             client: ClickhouseClient = cur._client
@@ -1727,7 +1739,7 @@ class ClickhouseExecuteFileMultiStatementsModule(PipeTask):
                     continue
 
                 cur.execute(query_part, params)
-    
+
     def execute_if_eval(self, context, cur):
         match self.execute_if:
             case bool():
@@ -1830,7 +1842,7 @@ value: {res}"""
 
             if len(res) != 1 or len(res) > 1:
                 raise RuntimeError(common_error)
-            
+
             res = res[0]
 
             if not isinstance(res, bool):
@@ -1909,7 +1921,7 @@ value: {res}"""
 
             if len(res) != 1 or len(res) > 1:
                 raise RuntimeError(common_error)
-            
+
             res = res[0]
 
             if not isinstance(res, bool):
@@ -1932,6 +1944,7 @@ value: {res}"""
         return builder
 
     return wrapper
+
 
 def ch_fetchone_to_context(
     save_to: str,
@@ -1968,6 +1981,7 @@ def ch_fetchone_to_context(
 
     return wrapper
 
+
 def ch_fetchall_to_context(
     save_to: str,
     save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
@@ -2002,6 +2016,7 @@ def ch_fetchall_to_context(
         return builder
 
     return wrapper
+
 
 def ch_fetchone_to_xcom(
     save_to: str = XCOM_RETURN_KEY,
@@ -2039,6 +2054,7 @@ def ch_fetchone_to_xcom(
 
     return wrapper
 
+
 def ch_fetchall_to_xcom(
     save_to: str = XCOM_RETURN_KEY,
     save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
@@ -2074,6 +2090,7 @@ def ch_fetchall_to_xcom(
         return builder
 
     return wrapper
+
 
 def ch_execute_and_save_to_context(
     sql: str,
@@ -2121,7 +2138,7 @@ def ch_execute_and_save_to_context(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2145,6 +2162,7 @@ def ch_execute_and_save_to_context(
         return builder
 
     return wrapper
+
 
 def ch_execute_and_fetchone_to_context(
     sql: str,
@@ -2191,7 +2209,7 @@ def ch_execute_and_fetchone_to_context(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2215,6 +2233,7 @@ def ch_execute_and_fetchone_to_context(
         return builder
 
     return wrapper
+
 
 def ch_execute_and_fetchall_to_context(
     sql: str,
@@ -2261,7 +2280,7 @@ def ch_execute_and_fetchall_to_context(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2285,6 +2304,7 @@ def ch_execute_and_fetchall_to_context(
         return builder
 
     return wrapper
+
 
 def ch_execute_and_save_to_xcom(
     sql: str,
@@ -2332,7 +2352,7 @@ def ch_execute_and_save_to_xcom(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2340,7 +2360,7 @@ def ch_execute_and_save_to_xcom(
             ),
             pipe_stage,
         )
-        
+
         builder.add_module(
             ClickhouseSaveToXComModule(
                 builder.context_key,
@@ -2377,7 +2397,7 @@ def ch_execute_and_fetchone_to_xcom(
 
     Args:
         sql: это sql запрос, который будет выполнен
-        save_to: это имя xcom ключа, по умолчанию 
+        save_to: это имя xcom ключа, по умолчанию
         jinja_render: если True, то значение будет передано в шаблонизатор jinja2
 
     Examples:
@@ -2393,7 +2413,7 @@ def ch_execute_and_fetchone_to_xcom(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2417,6 +2437,7 @@ def ch_execute_and_fetchone_to_xcom(
         return builder
 
     return wrapper
+
 
 def ch_execute_and_fetchall_to_xcom(
     sql: str,
@@ -2452,7 +2473,7 @@ def ch_execute_and_fetchall_to_xcom(
                 sql,
                 params,
                 external_tables=external_tables,
-                query_id=query_id, 
+                query_id=query_id,
                 settings=settings or {},
                 types_check=types_check,
                 execute_if=execute_if,
@@ -2476,4 +2497,3 @@ def ch_execute_and_fetchall_to_xcom(
         return builder
 
     return wrapper
-

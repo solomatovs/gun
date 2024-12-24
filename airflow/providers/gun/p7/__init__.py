@@ -1,7 +1,7 @@
 from http.client import HTTPResponse
 import json
 from time import sleep
-from typing import Callable, Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union
 from urllib.request import (
     Request,
     BaseHandler,
@@ -14,10 +14,8 @@ from airflow.providers.gun.http import (
     HttpConnReq,
     HttpAddAuthConnIdHandler,
     HttpHeadersFromDictModule,
-    HttpReqBodyFromDictModule,
     HttpRes,
     HttpSaveToContextModule,
-    HTTPRetryRequestIfResponseModule,
     HTTPDefaultErrorWithBodyHandler,
 )
 from airflow.providers.gun.http.informatica_auth import InformaticaAuthHandler
@@ -598,7 +596,7 @@ Please review the informatica http response body:
                 return True
 
         return False
-    
+
     def http_response(self, request: Request, response: HTTPResponse) -> HTTPResponse:
         if self.retry_if_mapping_not_done(request, response):
             return self.parent.open(request, timeout=request.timeout)
