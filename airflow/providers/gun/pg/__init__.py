@@ -2232,7 +2232,7 @@ def pg_fetchone_to_xcom(
 
     Examples:
         Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom("my_context_key")
+        >>> @pg_fetchone_to_xcom()
     """
 
     def wrapper(builder: PipeTaskBuilder):
@@ -2268,7 +2268,7 @@ def pg_fetchall_to_xcom(
 
     Examples:
         Например можно сохранить кол-во строк, которые вернул postgres:
-        >>> @pg_save_result_to_xcom("my_context_key")
+        >>> @pg_fetchall_to_xcom()
     """
 
     def wrapper(builder: PipeTaskBuilder):
