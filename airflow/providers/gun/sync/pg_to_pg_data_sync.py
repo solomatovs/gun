@@ -1204,7 +1204,7 @@ where 1=1
             context["delete_row"] = delete_row
 
 
-class PostgresToPostgresDataReload:
+class PostgresToPostgresDataSync:
     def __init__(
         self,
         logger,
@@ -1260,7 +1260,7 @@ class PostgresToPostgresDataReload:
             self.exclude_columns,
         )
 
-        self.sync_data(
+        self.data_sync(
             src_cursor,
             src_schema,
             src_table,
@@ -1273,7 +1273,7 @@ class PostgresToPostgresDataReload:
             context,
         )
 
-    def sync_data(
+    def data_sync(
         self,
         src_cursor: psycopg2.extensions.cursor,
         src_schema: str,
@@ -1727,7 +1727,7 @@ parameter reload_strategy must be of type PostgresDeleteStrategy and support var
         )
 
 
-class PostgresToPostgresFullReload(PostgresToPostgresDataReload):
+class PostgresToPostgresFullReload(PostgresToPostgresDataSync):
     def __init__(
         self,
         logger,
@@ -1807,7 +1807,7 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
         tgt_hook = PostgresHook(postgres_conn_id=self.tgt_conn_id)
         tgt_cursor = self.stack.enter_context(closing(tgt_hook.get_cursor()))
 
-        base_module = PostgresToPostgresDataReload(
+        base_module = PostgresToPostgresDataSync(
             self.log,
             src_cursor,
             self.src_schema,
@@ -1825,7 +1825,7 @@ class PostgresToPostgresFullReloadOperator(BaseOperator):
         base_module.execute(context)
 
 
-class PostgresToPostgresDataReloadModule(PipeTask):
+class PostgresToPostgresDataSyncModule(PipeTask):
     def __init__(
         self,
         context_key: str,
@@ -1918,7 +1918,7 @@ It must be a class that inherits from PostgresReloadStrategy"""
                 f"""invalid insert_strategy parameter passed, type: {type(self.insert_strategy)}
 It must be a class that inherits from PostgresReloadStrategy"""
             )
-        base_module = PostgresToPostgresDataReload(
+        base_module = PostgresToPostgresDataSync(
             log,
             src_cursor,
             self.src_schema,
@@ -1979,7 +1979,7 @@ def pg_to_pg_data_sync(
         )
 
         builder.add_module(
-            PostgresToPostgresDataReloadModule(
+            PostgresToPostgresDataSyncModule(
                 builder.context_key,
                 builder.template_render,
                 src_cur_key,
@@ -2043,7 +2043,7 @@ def pg_full_reload(
         )
 
         builder.add_module(
-            PostgresToPostgresDataReloadModule(
+            PostgresToPostgresDataSyncModule(
                 builder.context_key,
                 builder.template_render,
                 pg_cur_key,
@@ -2108,7 +2108,7 @@ def pg_to_pg_full_reload(
         )
 
         builder.add_module(
-            PostgresToPostgresDataReloadModule(
+            PostgresToPostgresDataSyncModule(
                 builder.context_key,
                 builder.template_render,
                 src_cur_key,
@@ -2173,7 +2173,7 @@ def pg_to_pg_period_reload(
         )
 
         builder.add_module(
-            PostgresToPostgresDataReloadModule(
+            PostgresToPostgresDataSyncModule(
                 builder.context_key,
                 builder.template_render,
                 src_cur_key,

@@ -5,6 +5,7 @@ from typing import (
     Dict,
     Sequence,
     Union,
+    Any,
 )
 import itertools
 import logging
@@ -50,7 +51,7 @@ class PostgresToClickhouseSchemaStrategy(Enum):
     do_nothing = "do_nothing"
 
 
-class ClickhouseToClickhouseSchemaSyncOverrideColumn:
+class PostgresToClickhouseSchemaSyncOverrideColumn:
     def __init__(
         self,
         name: str,
@@ -72,7 +73,7 @@ class ClickhouseToClickhouseSchemaSyncOverrideColumn:
     def __eq__(self, other):
         if isinstance(other, str):
             return self.name == other
-        elif isinstance(other, ClickhouseToClickhouseSchemaSyncOverrideColumn):
+        elif isinstance(other, PostgresToClickhouseSchemaSyncOverrideColumn):
             return self.name == other.name
 
         return NotImplemented
@@ -286,7 +287,7 @@ rule: {self}"""
         )
 
 
-class PostgresToClickhouseSchemaSync:
+class PostgresToClickhouseSchemaCheck:
     def __init__(
         self,
         logger,
@@ -297,15 +298,9 @@ class PostgresToClickhouseSchemaSync:
         tgt_schema: str,
         tgt_table: str,
         src_table_check: bool,
-        ch_cluster: Optional[str] = "gpn",
-        ch_order_by: Optional[str] = None,
-        schema_strategy: Union[
-            PostgresToClickhouseSchemaStrategy, str
-        ] = PostgresToClickhouseSchemaStrategy("create_table_if_not_exists"),
         rename_columns: Optional[Union[str, Dict[str, str]]] = None,
         override_schema: Optional[Union[str, Dict[str, str]]] = None,
         exclude_columns: Optional[Union[str, List[str]]] = None,
-        create_table_template: Optional[str] = None,
     ) -> None:
         self.log = logger
         self.src_cursor = src_cursor
@@ -315,10 +310,6 @@ class PostgresToClickhouseSchemaSync:
         self.tgt_schema = tgt_schema
         self.tgt_table = tgt_table
         self.src_table_check = src_table_check
-        self.ch_cluster = ch_cluster
-        self.ch_order_by = ch_order_by
-        self.schema_strategy = schema_strategy
-        self.create_table_template = create_table_template
         self.rename_columns = rename_columns
         self.override_schema = override_schema
         self.exclude_columns = exclude_columns
@@ -335,40 +326,28 @@ class PostgresToClickhouseSchemaSync:
             tgt_schema,
             tgt_table,
             src_table_check,
-            ch_cluster,
-            ch_order_by,
-            schema_strategy,
-            create_table_template,
             rule_columns,
         ) = self.clean_validate_and_flatten_params(
-            self.src_schema,
-            self.src_table,
-            self.tgt_schema,
-            self.tgt_table,
-            self.src_table_check,
-            self.ch_cluster,
-            self.ch_order_by,
-            self.schema_strategy,
-            self.rename_columns,
-            self.override_schema,
-            self.exclude_columns,
-            self.create_table_template,
+            src_schema=self.src_schema,
+            src_table=self.src_table,
+            tgt_schema=self.tgt_schema,
+            tgt_table=self.tgt_table,
+            src_table_check=self.src_table_check,
+            rename_columns=self.rename_columns,
+            override_schema=self.override_schema,
+            exclude_columns=self.exclude_columns,
         )
-
-        self.sync_schema(
-            schema_strategy,
-            src_cursor,
-            src_schema,
-            src_table,
-            tgt_cursor,
-            tgt_schema,
-            tgt_table,
-            src_table_check,
-            ch_cluster,
-            ch_order_by,
-            rule_columns,
-            create_table_template,
-            context,
+        
+        return self.schema_check(
+            src_cursor=src_cursor,
+            src_schema=src_schema,
+            src_table=src_table,
+            tgt_cursor=tgt_cursor,
+            tgt_schema=tgt_schema,
+            tgt_table=tgt_table,
+            src_table_check=src_table_check,
+            rule_columns=rule_columns,
+            context=context,
         )
 
     def clean_validate_and_flatten_params(
@@ -378,100 +357,17 @@ class PostgresToClickhouseSchemaSync:
         tgt_schema,
         tgt_table,
         src_table_check,
-        ch_cluster,
-        ch_order_by,
-        schema_strategy,
         rename_columns,
         override_schema,
         exclude_columns,
-        create_table_template,
     ):
-        if isinstance(schema_strategy, str):
-            schema_strategy = PostgresToClickhouseSchemaStrategy(schema_strategy)
-        elif isinstance(schema_strategy, PostgresToClickhouseSchemaStrategy):
-            schema_strategy = schema_strategy
-        else:
-            raise TypeError(
-                f"schema_strategy type not valid: {type(schema_strategy)}: {schema_strategy}. Please use class PostgresToClickhouseSchemaStrategy"
-            )
-
         if src_table_check is None or not isinstance(src_table_check, bool):
             RuntimeError(
                 f""""src_table_check" parameter must be bool
 {type(src_table_check)}: {src_table_check}"""
             )
 
-        if ch_cluster is not None and not isinstance(ch_cluster, str):
-            raise TypeError(
-                f"""'ch_cluster' parameter must be str
-{type(ch_cluster): {ch_cluster}}")"""
-            )
-
-        if ch_order_by is None:
-            ch_order_by = "tuple()"  # означает отсутствие сортировки
-
-        if ch_order_by is not None and not isinstance(ch_order_by, str):
-            raise TypeError(
-                f"""'ch_order_by' parameter must be str
-{type(ch_order_by): {ch_order_by}}")"""
-            )
-
-        if create_table_template is None:
-            create_table_template = """create table {ch_table} {ch_cluster} (
-{ch_columns}
-)
-engine ReplicatedMergeTree
-{ch_order_by}"""
-        
-        if not isinstance(create_table_template, str):
-            raise RuntimeError(
-                f"""'create_table_template' parameter must be str
-{type(create_table_template)}: {create_table_template}"""
-            )
-
-        error_render_template = (
-            """'create_table_template' parameter is incorrect:
-"""
-            + create_table_template
-            + """
-
-create_table_template must contain all parameters:
-{ch_table}     - the full path to the table will be substituted here, for example: {ch_table} => "dct_cds"."t1"
-{ch_columns}   - columns that will be generated during synchronization, for example: {ch_columns} => col_1 Int32, col_2 DateTime64, "COL_3" String not null"
-{ch_cluster}   - specify clickhouse cluster, for example: {ch_cluster} => on cluster gpn
-{ch_order_by}  - The column or list of columns by which the data in the table should be sorted, for example: {ch_order_by} => order by (COL_1, COL_3)
-
-For example, the default template:
-
-create table {ch_table} {ch_cluster} (
-{ch_columns}
-)
-engine ReplicatedMergeTree
-{ch_order_by},
-"""
-        )
-        try:
-            # тестирую возможность отрендерить шаблон
-            # если тест неудачный, значит есть переменные в шаблоне, которые невозможно отрендерить
-            create_table_template.format(
-                **{
-                    "ch_table": "ch_table",
-                    "ch_columns": "ch_columns",
-                    "ch_cluster": "ch_cluster",
-                    "ch_order_by": "ch_order_by",
-                }
-            )
-        except Exception as e:
-            raise RuntimeError(error_render_template)
-
-        if (
-            create_table_template.find("{ch_table}") == -1
-            or create_table_template.find("{ch_columns}") == -1
-            or create_table_template.find("{ch_order_by}") == -1
-        ):
-            raise RuntimeError(error_render_template)
-
-        rule_columns: List[ClickhouseToClickhouseSchemaSyncOverrideColumn] = []
+        rule_columns: List[PostgresToClickhouseSchemaSyncOverrideColumn] = []
 
         if not rename_columns:
             rename_columns = {}
@@ -492,7 +388,7 @@ engine ReplicatedMergeTree
                         val.rename_from = rename_from
                     else:
                         rule_columns.append(
-                            ClickhouseToClickhouseSchemaSyncOverrideColumn(
+                            PostgresToClickhouseSchemaSyncOverrideColumn(
                                 name=name,
                                 rename_from=rename_from,
                             )
@@ -545,7 +441,7 @@ Its value: {}""".format(
                         val.override_type = override_type
                     else:
                         rule_columns.append(
-                            ClickhouseToClickhouseSchemaSyncOverrideColumn(
+                            PostgresToClickhouseSchemaSyncOverrideColumn(
                                 name=name,
                                 override_type=override_type,
                             )
@@ -592,7 +488,7 @@ Its value: {}""".format(
                         val.exclude = True
                     else:
                         rule_columns.append(
-                            ClickhouseToClickhouseSchemaSyncOverrideColumn(
+                            PostgresToClickhouseSchemaSyncOverrideColumn(
                                 name=name,
                                 exclude=True,
                             )
@@ -630,590 +526,11 @@ Its value: {}""".format(
             tgt_schema,
             tgt_table,
             src_table_check,
-            ch_cluster,
-            ch_order_by,
-            schema_strategy,
-            create_table_template,
-            rule_columns,
+           rule_columns,
         )
 
-    def make_fields_info(
+    def check_equal_columns(
         self,
-        src_table_check,
-        src_cursor,
-        src_schema,
-        src_table,
-        tgt_cursor,
-        tgt_schema,
-        tgt_table,
-        rule_columns,
-    ):
-        if src_table_check:
-            if src_schema is None or src_table is None:
-                raise RuntimeError(
-                    f"""src_schema or src_table is None
-src_schema = {src_schema}
-src_table = {src_table}
-
-Please pass "src_schema" and "src_table", or disable the "src_table_check" check
-"""
-                )
-            if not self.pg_man.pg_check_table_exist(src_cursor, src_schema, src_table):
-                raise RuntimeError(
-                    f"""src_table_check = {src_table_check}
-The table: {src_schema} {src_table} not found in {src_cursor.connection.dsn}
-
-Please make sure of this manually, or disable the "src_table_check" parameter"""
-                )
-        else:
-            self.log.info(f"src_table_check = {src_table_check}")
-
-        if src_schema is not None and src_table is not None:
-            src_info = self.pg_man.pg_get_fields(src_cursor, src_schema, src_table)
-        else:
-            src_info = []
-
-        tgt_info = self.ch_man.ch_get_fields(tgt_cursor, tgt_schema, tgt_table)
-
-        union_columns = self.union_src_tgt_and_rules(
-            src_schema,
-            src_table,
-            tgt_schema,
-            tgt_table,
-            src_info,
-            tgt_info,
-            rule_columns,
-        )
-
-        return union_columns
-
-    def sync_schema(
-        self,
-        schema_strategy,
-        src_cursor,
-        src_schema: Optional[str],
-        src_table: Optional[str],
-        tgt_cursor,
-        tgt_schema: str,
-        tgt_table: str,
-        src_table_check: bool,
-        ch_cluster: str,
-        ch_order_by: str,
-        rule_columns: List[ClickhouseToClickhouseSchemaSyncOverrideColumn],
-        create_table_template: str,
-        context,
-    ):
-        self.log.info(f"")
-        self.log.info(
-            f"schema sync: {src_schema}.{src_table} -> {tgt_schema}.{tgt_table}"
-        )
-        self.log.info(f"pg src: {src_cursor.connection.dsn}")
-        self.log.info(f"ch tgt: {tgt_cursor._client.connection}")
-
-        error_table_missing_ods = f"""Table missing in src: {tgt_schema}.{tgt_table}
-To automatically create a schema, use the strategy:
-- create_table_if_not_exists
-- backup_and_create_table_if_schema_changed
-- backup_and_create_table_if_exist
-- drop_and_create_table_if_schema_changed
-- drop_and_create_table_if_exist
-"""
-
-        union_columns = self.make_fields_info(
-            src_table_check,
-            src_cursor,
-            src_schema,
-            src_table,
-            tgt_cursor,
-            tgt_schema,
-            tgt_table,
-            rule_columns,
-        )
-
-        match schema_strategy:
-            case PostgresToClickhouseSchemaStrategy.create_table_if_not_exists:
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                exists = self.ch_man.ch_check_table_exist(
-                    tgt_cursor, tgt_schema, tgt_table
-                )
-                if not exists:
-                    self.log.warning(
-                        f"""Table is missing {tgt_schema}.{tgt_table}
-I'm trying to create a table"""
-                    )
-
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-
-                    # после создания таблицы нужно обновить информацию о колонках
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-            case PostgresToClickhouseSchemaStrategy.error_if_table_schema_changed:
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                exists = self.ch_man.ch_check_table_exist(
-                    tgt_cursor, tgt_schema, tgt_table
-                )
-                if not exists:
-                    raise RuntimeError(error_table_missing_ods)
-
-                self.log.info(
-                    f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
-                )
-                equal_schema, error = self.check_equal_structure(
-                    src_schema,
-                    src_table,
-                    tgt_schema,
-                    tgt_table,
-                    union_columns,
-                )
-                if not equal_schema:
-                    raise RuntimeError(error)
-
-            case PostgresToClickhouseSchemaStrategy.error_if_table_not_exist:
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                exists = self.ch_man.ch_check_table_exist(
-                    tgt_cursor, tgt_schema, tgt_table
-                )
-                if not exists:
-                    raise RuntimeError(error_table_missing_ods)
-
-            case (
-                PostgresToClickhouseSchemaStrategy.backup_and_create_table_if_schema_changed
-            ):
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                exists = self.ch_man.ch_check_table_exist(
-                    tgt_cursor, tgt_schema, tgt_table
-                )
-                if not exists:
-                    self.log.warning(
-                        f"""Table is missing {tgt_schema}.{tgt_table}
-I'm trying to create a table"""
-                    )
-
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-                    self.log.info(
-                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                    )
-
-                    self.log.info(
-                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                    )
-                    exists = self.ch_man.ch_check_table_exist(
-                        tgt_cursor, tgt_schema, tgt_table
-                    )
-                    if not exists:
-                        raise RuntimeError(
-                            f"""Failed to automatically create tgt {tgt_schema}.{tgt_table}
-Probably an error occurred that could not be processed.
-Please create table manually"""
-                        )
-
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-                self.log.info(
-                    f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
-                )
-                equal_schema, error = self.check_equal_structure(
-                    src_schema,
-                    src_table,
-                    tgt_schema,
-                    tgt_table,
-                    union_columns,
-                )
-                if not equal_schema:
-                    self.log.warning(error)
-                    self.log.info(
-                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                    )
-                    exists = self.ch_man.ch_check_table_exist(
-                        tgt_cursor, tgt_schema, tgt_table
-                    )
-                    if exists:
-                        self.log.warning(
-                            f"""Table already exists {tgt_schema}.{tgt_table}
-    Trying to backup the table"""
-                        )
-
-                        self.backup_tgt_table(
-                            tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
-                        )
-
-                        self.log.info(
-                            f"""Table backup completed successfully
-creating a new table {tgt_schema}.{tgt_table}"""
-                        )
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-                    self.log.info(
-                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                    )
-
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-            case PostgresToClickhouseSchemaStrategy.backup_and_create_table_if_exist:
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                if self.ch_man.ch_check_table_exist(tgt_cursor, tgt_schema, tgt_table):
-                    self.log.warning(
-                        f"""Table already exists {tgt_schema}.{tgt_table}
-Trying to backup the table"""
-                    )
-
-                    self.backup_tgt_table(
-                        tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
-                    )
-
-                    self.log.warning(
-                        f"""Table backup completed successfully
-creating a new table {tgt_schema}.{tgt_table}"""
-                    )
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-                    self.log.info(
-                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                    )
-
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-            case (
-                PostgresToClickhouseSchemaStrategy.drop_and_create_table_if_schema_changed
-            ):
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                exists = self.ch_man.ch_check_table_exist(
-                    tgt_cursor, tgt_schema, tgt_table
-                )
-                if not exists:
-                    self.log.warning(
-                        f"""Table is missing {tgt_schema}.{tgt_table}
-I'm trying to create a table"""
-                    )
-
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-                    self.log.info(
-                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                    )
-
-                    self.log.info(
-                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                    )
-                    exists = self.ch_man.ch_check_table_exist(
-                        tgt_cursor, tgt_schema, tgt_table
-                    )
-                    if not exists:
-                        raise RuntimeError(
-                            f"""Failed to automatically create tgt {tgt_schema}.{tgt_table}
-Probably an error occurred that could not be processed.
-Please create table manually"""
-                        )
-
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-                self.log.info(
-                    f"""Checking equal schema between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
-                )
-                equal_schema, error = self.check_equal_structure(
-                    src_schema,
-                    src_table,
-                    tgt_schema,
-                    tgt_table,
-                    union_columns,
-                )
-                if not equal_schema:
-                    self.log.warning(error)
-                    self.log.info(
-                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                    )
-                    exists = self.ch_man.ch_check_table_exist(
-                        tgt_cursor, tgt_schema, tgt_table
-                    )
-                    if exists:
-                        self.log.warning(
-                            f"""The table has been dropped: {tgt_schema}.{tgt_table}
-Trying to drop the table"""
-                        )
-
-                        self.drop_tgt_table(
-                            tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
-                        )
-
-                        self.log.info(
-                            f"""Table droping success: {tgt_schema}.{tgt_table}
-I'm trying to create a table"""
-                        )
-                    self.create_tgt_table(
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        ch_cluster,
-                        ch_order_by,
-                        union_columns,
-                        create_table_template,
-                    )
-
-                    self.log.info(
-                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                    )
-
-                    union_columns = self.make_fields_info(
-                        src_table_check,
-                        src_cursor,
-                        src_schema,
-                        src_table,
-                        tgt_cursor,
-                        tgt_schema,
-                        tgt_table,
-                        rule_columns,
-                    )
-
-            case PostgresToClickhouseSchemaStrategy.drop_and_create_table_if_exist:
-                self.log.info(
-                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
-                )
-                if self.ch_man.ch_check_table_exist(tgt_cursor, tgt_schema, tgt_table):
-                    self.log.warning(
-                        f"""Table already exists {tgt_schema}.{tgt_table}
-Trying to drop the table"""
-                    )
-
-                    self.drop_tgt_table(
-                        tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
-                    )
-
-                    self.log.info(
-                        f"""Table droping success: {tgt_schema}.{tgt_table}
-I'm trying to create a table"""
-                    )
-                else:
-                    self.log.info(
-                        f"""The table is missing: {tgt_schema}.{tgt_table}
-trying to create it"""
-                    )
-
-                self.create_tgt_table(
-                    tgt_cursor,
-                    tgt_schema,
-                    tgt_table,
-                    ch_cluster,
-                    ch_order_by,
-                    union_columns,
-                    create_table_template,
-                )
-
-                self.log.info(
-                    f"""Table created successfully: {tgt_schema}.{tgt_table}"""
-                )
-
-                union_columns = self.make_fields_info(
-                    src_table_check,
-                    src_cursor,
-                    src_schema,
-                    src_table,
-                    tgt_cursor,
-                    tgt_schema,
-                    tgt_table,
-                    rule_columns,
-                )
-
-            case PostgresToClickhouseSchemaStrategy.do_nothing:
-                self.log.info(
-                    f"""Strategy do_nothing selected
-I do not perform any operations on the table schema {tgt_schema}.{tgt_table}"""
-                )
-
-            case x:
-                raise RuntimeError(
-                    f"""Strategy {x} does not have a handler
-Please check the correctness of the parameter 'schema_strategy'"""
-                )
-
-    def create_tgt_table(
-        self,
-        cursor,
-        database,
-        table,
-        ch_cluster,
-        ch_order_by,
-        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
-        create_table_template,
-    ):
-        self.log.info(f"Creating a tgt table in clickhouse {database}.{table} ...")
-
-        # проверяем наличие базы и создаём её если отсутствует
-        self.log.info(
-            f"""Checking for database existence in clickhouse: "{database}" ..."""
-        )
-        if not self.ch_man.ch_check_database_exists(cursor, database):
-            self.log.warning(f"Database is missing: {database}")
-            self.ch_man.ch_create_database(
-                cursor,
-                database,
-                if_not_exists=False,
-                cluster=ch_cluster,
-                engine=None,
-                comment=None,
-            )
-        else:
-            self.log.info(f"The database exists: {database}")
-
-        # формируем список столбцов для выражения create table
-        # нужно отсортировать колонки строго так, как они сделаны в postgres (что бы красиво было ^:)
-        # для этого я использую ordinal_position
-        sorted_fields = sorted(union_columns)
-
-        self.log.info("rules for creating table columns:")
-        for x in sorted_fields.copy():
-            self.log.info(f"{x}")
-
-        # делаю список столбцов, который будет частью выражения create table (create_fields)
-        create_fields = map(
-            lambda x: x.create_tgt_fields_stmp(cursor), sorted_fields.copy()
-        )
-        create_fields = [x for x in create_fields if x is not None]
-
-        # отправляем запрос на создание таблицы
-        self.ch_man.ch_create_table(
-            cursor,
-            database,
-            table,
-            columns=create_fields,
-            order_by=ch_order_by,
-            cluster=ch_cluster,
-            create_table_template=create_table_template,
-        )
-
-        self.log.info(f"Table create success")
-
-    def drop_tgt_table(
-        self,
-        ch_cursor,
-        ch_database,
-        ch_table,
-        ch_cluster,
-        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
-    ):
-        self.ch_man.ch_drop_table(
-            ch_cursor,
-            ch_database,
-            ch_table,
-            cluster=ch_cluster,
-            temporary=None,
-            sync=None,
-        )
-
-    def backup_tgt_table(
-        self,
-        ch_cursor,
-        ch_database,
-        ch_table,
-        ch_cluster,
-        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
-    ):
-        self.ch_man.ch_backup_table(
-            ch_cursor,
-            ch_database,
-            ch_table,
-            cluster=ch_cluster,
-        )
-
-    def check_equal_structure(
-        self,
-        src_schema,
-        src_table,
-        tgt_schema,
-        tgt_table,
         union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
     ):
         self.log.info("matching rules:")
@@ -1223,6 +540,20 @@ Please check the correctness of the parameter 'schema_strategy'"""
         diff = map(lambda column: column.compare_column(), union_columns)
         diff = filter(lambda x: not x[0], diff)
         diff = list(diff)
+
+        return diff
+    
+    def check_equal_columns_text(
+        self,
+        src_schema,
+        src_table,
+        tgt_schema,
+        tgt_table,
+        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
+    ):
+        diff = self.check_equal_columns(
+            union_columns,
+        )
 
         if len(diff) > 0:
             error = f"""Error validation columns
@@ -1250,7 +581,7 @@ Please make the columns src and tgt equal or disable validation
         tgt_table,
         src_info: List[Dict],
         tgt_info: List[Dict],
-        rule_columns: List[ClickhouseToClickhouseSchemaSyncOverrideColumn],
+        rule_columns: List[PostgresToClickhouseSchemaSyncOverrideColumn],
     ):
         column_name = "column_name"
         ordinal_position = "ordinal_position"
@@ -1397,6 +728,854 @@ manual_columns: {rule_columns}
             )
 
         return columns
+
+    def make_fields_info(
+        self,
+        src_table_check,
+        src_cursor,
+        src_schema,
+        src_table,
+        tgt_cursor,
+        tgt_schema,
+        tgt_table,
+        rule_columns,
+    ):
+        if src_table_check:
+            if src_schema is None or src_table is None:
+                raise RuntimeError(
+                    f"""src_schema or src_table is None
+src_schema = {src_schema}
+src_table = {src_table}
+
+Please pass "src_schema" and "src_table", or disable the "src_table_check" check
+"""
+                )
+            if not self.pg_man.pg_check_table_exist(src_cursor, src_schema, src_table):
+                raise RuntimeError(
+                    f"""src_table_check = {src_table_check}
+The table: {src_schema} {src_table} not found in {src_cursor.connection.dsn}
+
+Please make sure of this manually, or disable the "src_table_check" parameter"""
+                )
+        else:
+            self.log.info(f"src_table_check = {src_table_check}")
+
+        if src_schema is not None and src_table is not None:
+            src_info = self.pg_man.pg_get_fields(src_cursor, src_schema, src_table)
+        else:
+            src_info = []
+
+        tgt_info = self.ch_man.ch_get_fields(tgt_cursor, tgt_schema, tgt_table)
+
+        union_columns = self.union_src_tgt_and_rules(
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            src_info,
+            tgt_info,
+            rule_columns,
+        )
+
+        return union_columns
+
+    def schema_check(
+        self,
+        src_cursor,
+        src_schema: str,
+        src_table: str,
+        tgt_cursor,
+        tgt_schema: str,
+        tgt_table: str,
+        src_table_check: bool,
+        rule_columns: List[PostgresToClickhouseSchemaSyncOverrideColumn],
+        context,
+    ):
+        self.log.info(f"")
+        self.log.info(
+            f"schema check: {src_schema}.{src_table} -> {tgt_schema}.{tgt_table}"
+        )
+        self.log.info(f"pg src: {src_cursor.connection.dsn}")
+        self.log.info(f"ch tgt: {tgt_cursor.connection.dsn}")
+
+        self.log.info(
+            f"load field info: {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"
+        )
+
+        try:
+            union_columns = self.make_fields_info(
+                src_table_check=src_table_check,
+                src_cursor=src_cursor,
+                src_schema=src_schema,
+                src_table=src_table,
+                tgt_cursor=tgt_cursor,
+                tgt_schema=tgt_schema,
+                tgt_table=tgt_table,
+                rule_columns=rule_columns,
+            )
+
+            self.log.info(
+                f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
+            )
+            
+            diff = self.check_equal_columns(
+                union_columns,
+            )
+
+            return diff
+        except RuntimeError as e:
+            self.log.info(
+            f"""failed to load field info:
+{e}""")
+            raise e
+
+        
+
+class PostgresToClickhouseSchemaSync:
+    def __init__(
+        self,
+        logger,
+        src_cursor: psycopg2.extensions.cursor,
+        src_schema: Optional[str],
+        src_table: Optional[str],
+        tgt_cursor: ClickhouseCursor,
+        tgt_schema: str,
+        tgt_table: str,
+        src_table_check: bool,
+        ch_cluster: Optional[str] = "gpn",
+        ch_order_by: Optional[str] = None,
+        schema_strategy: Union[
+            PostgresToClickhouseSchemaStrategy, str
+        ] = PostgresToClickhouseSchemaStrategy("create_table_if_not_exists"),
+        rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+        override_schema: Optional[Union[str, Dict[str, str]]] = None,
+        exclude_columns: Optional[Union[str, List[str]]] = None,
+        create_table_template: Optional[str] = None,
+    ) -> None:
+        self.log = logger
+        self.src_cursor = src_cursor
+        self.src_schema = src_schema
+        self.src_table = src_table
+        self.tgt_cursor = tgt_cursor
+        self.tgt_schema = tgt_schema
+        self.tgt_table = tgt_table
+        self.src_table_check = src_table_check
+        self.ch_cluster = ch_cluster
+        self.ch_order_by = ch_order_by
+        self.schema_strategy = schema_strategy
+        self.create_table_template = create_table_template
+        self.rename_columns = rename_columns
+        self.override_schema = override_schema
+        self.exclude_columns = exclude_columns
+        self.pg_man = PostgresManipulator(logger)
+        self.ch_man = ClickhouseManipulator(logger)
+
+        # проверка структуры вынесена в отдельный класс
+        self.schema_checker = PostgresToClickhouseSchemaCheck(
+            logger=self.log,
+            src_cursor=self.src_cursor,
+            src_schema =self.src_schema,
+            src_table =self.src_table,
+            tgt_cursor =self.tgt_cursor,
+            tgt_schema =self.tgt_schema,
+            tgt_table =self.tgt_table,
+            src_table_check =self.src_table_check,
+            rename_columns=self.rename_columns,
+            override_schema=self.override_schema,
+            exclude_columns=self.exclude_columns,
+        )
+
+    def execute(self, context):
+        src_cursor = self.src_cursor
+        tgt_cursor = self.tgt_cursor
+
+        (
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            src_table_check,
+            ch_cluster,
+            ch_order_by,
+            schema_strategy,
+            create_table_template,
+            rule_columns,
+        ) = self.clean_validate_and_flatten_params(
+            self.src_schema,
+            self.src_table,
+            self.tgt_schema,
+            self.tgt_table,
+            self.src_table_check,
+            self.ch_cluster,
+            self.ch_order_by,
+            self.schema_strategy,
+            self.rename_columns,
+            self.override_schema,
+            self.exclude_columns,
+            self.create_table_template,
+        )
+
+        self.schema_sync(
+            schema_strategy,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            src_table_check,
+            ch_cluster,
+            ch_order_by,
+            rule_columns,
+            create_table_template,
+            context,
+        )
+
+    def clean_validate_and_flatten_params(
+        self,
+        src_schema,
+        src_table,
+        tgt_schema,
+        tgt_table,
+        src_table_check,
+        ch_cluster,
+        ch_order_by,
+        schema_strategy,
+        rename_columns,
+        override_schema,
+        exclude_columns,
+        create_table_template,
+    ):
+        if isinstance(schema_strategy, str):
+            schema_strategy = PostgresToClickhouseSchemaStrategy(schema_strategy)
+        elif isinstance(schema_strategy, PostgresToClickhouseSchemaStrategy):
+            schema_strategy = schema_strategy
+        else:
+            raise TypeError(
+                f"schema_strategy type not valid: {type(schema_strategy)}: {schema_strategy}. Please use class PostgresToClickhouseSchemaStrategy"
+            )
+
+        if ch_cluster is not None and not isinstance(ch_cluster, str):
+            raise TypeError(
+                f"""'ch_cluster' parameter must be str
+{type(ch_cluster): {ch_cluster}}")"""
+            )
+
+        if ch_order_by is None:
+            ch_order_by = "tuple()"  # означает отсутствие сортировки
+
+        if ch_order_by is not None and not isinstance(ch_order_by, str):
+            raise TypeError(
+                f"""'ch_order_by' parameter must be str
+{type(ch_order_by): {ch_order_by}}")"""
+            )
+
+        if create_table_template is None:
+            create_table_template = """create table {ch_table} {ch_cluster} (
+{ch_columns}
+)
+engine ReplicatedMergeTree
+{ch_order_by}"""
+        
+        if not isinstance(create_table_template, str):
+            raise RuntimeError(
+                f"""'create_table_template' parameter must be str
+{type(create_table_template)}: {create_table_template}"""
+            )
+
+        error_render_template = (
+            """'create_table_template' parameter is incorrect:
+"""
+            + create_table_template
+            + """
+
+create_table_template must contain all parameters:
+{ch_table}     - the full path to the table will be substituted here, for example: {ch_table} => "dct_cds"."t1"
+{ch_columns}   - columns that will be generated during synchronization, for example: {ch_columns} => col_1 Int32, col_2 DateTime64, "COL_3" String not null"
+{ch_cluster}   - specify clickhouse cluster, for example: {ch_cluster} => on cluster gpn
+{ch_order_by}  - The column or list of columns by which the data in the table should be sorted, for example: {ch_order_by} => order by (COL_1, COL_3)
+
+For example, the default template:
+
+create table {ch_table} {ch_cluster} (
+{ch_columns}
+)
+engine ReplicatedMergeTree
+{ch_order_by},
+"""
+        )
+        try:
+            # тестирую возможность отрендерить шаблон
+            # если тест неудачный, значит есть переменные в шаблоне, которые невозможно отрендерить
+            create_table_template.format(
+                **{
+                    "ch_table": "ch_table",
+                    "ch_columns": "ch_columns",
+                    "ch_cluster": "ch_cluster",
+                    "ch_order_by": "ch_order_by",
+                }
+            )
+        except Exception as e:
+            raise RuntimeError(error_render_template)
+
+        if (
+            create_table_template.find("{ch_table}") == -1
+            or create_table_template.find("{ch_columns}") == -1
+            or create_table_template.find("{ch_order_by}") == -1
+        ):
+            raise RuntimeError(error_render_template)
+
+        (
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            src_table_check,
+            rule_columns,
+        ) = self.schema_checker.clean_validate_and_flatten_params(
+            src_schema=src_schema,
+            src_table=src_table,
+            tgt_schema=tgt_schema,
+            tgt_table=tgt_table,
+            src_table_check=src_table_check,
+            rename_columns=rename_columns,
+            override_schema=override_schema,
+            exclude_columns=exclude_columns,
+        )
+
+        return (
+            src_schema,
+            src_table,
+            tgt_schema,
+            tgt_table,
+            src_table_check,
+            ch_cluster,
+            ch_order_by,
+            schema_strategy,
+            create_table_template,
+            rule_columns,
+        )
+
+    def schema_sync(
+        self,
+        schema_strategy,
+        src_cursor,
+        src_schema: Optional[str],
+        src_table: Optional[str],
+        tgt_cursor,
+        tgt_schema: str,
+        tgt_table: str,
+        src_table_check: bool,
+        ch_cluster: str,
+        ch_order_by: str,
+        rule_columns: List[PostgresToClickhouseSchemaSyncOverrideColumn],
+        create_table_template: str,
+        context,
+    ):
+        self.log.info(f"")
+        self.log.info(
+            f"schema sync: {src_schema}.{src_table} -> {tgt_schema}.{tgt_table}"
+        )
+        self.log.info(f"pg src: {src_cursor.connection.dsn}")
+        self.log.info(f"ch tgt: {tgt_cursor._client.connection}")
+
+        error_table_missing_ods = f"""Table missing in src: {tgt_schema}.{tgt_table}
+To automatically create a schema, use the strategy:
+- create_table_if_not_exists
+- backup_and_create_table_if_schema_changed
+- backup_and_create_table_if_exist
+- drop_and_create_table_if_schema_changed
+- drop_and_create_table_if_exist
+"""
+
+        union_columns = self.schema_checker.make_fields_info(
+            src_table_check,
+            src_cursor,
+            src_schema,
+            src_table,
+            tgt_cursor,
+            tgt_schema,
+            tgt_table,
+            rule_columns,
+        )
+
+        match schema_strategy:
+            case PostgresToClickhouseSchemaStrategy.create_table_if_not_exists:
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                exists = self.ch_man.ch_check_table_exist(
+                    tgt_cursor, tgt_schema, tgt_table
+                )
+                if not exists:
+                    self.log.warning(
+                        f"""Table is missing {tgt_schema}.{tgt_table}
+I'm trying to create a table"""
+                    )
+
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+
+                    # после создания таблицы нужно обновить информацию о колонках
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+            case PostgresToClickhouseSchemaStrategy.error_if_table_schema_changed:
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                exists = self.ch_man.ch_check_table_exist(
+                    tgt_cursor, tgt_schema, tgt_table
+                )
+                if not exists:
+                    raise RuntimeError(error_table_missing_ods)
+
+                self.log.info(
+                    f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
+                )
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
+                    src_schema,
+                    src_table,
+                    tgt_schema,
+                    tgt_table,
+                    union_columns,
+                )
+                if not equal_schema:
+                    raise RuntimeError(error)
+
+            case PostgresToClickhouseSchemaStrategy.error_if_table_not_exist:
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                exists = self.ch_man.ch_check_table_exist(
+                    tgt_cursor, tgt_schema, tgt_table
+                )
+                if not exists:
+                    raise RuntimeError(error_table_missing_ods)
+
+            case (
+                PostgresToClickhouseSchemaStrategy.backup_and_create_table_if_schema_changed
+            ):
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                exists = self.ch_man.ch_check_table_exist(
+                    tgt_cursor, tgt_schema, tgt_table
+                )
+                if not exists:
+                    self.log.warning(
+                        f"""Table is missing {tgt_schema}.{tgt_table}
+I'm trying to create a table"""
+                    )
+
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+                    self.log.info(
+                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                    )
+
+                    self.log.info(
+                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                    )
+                    exists = self.ch_man.ch_check_table_exist(
+                        tgt_cursor, tgt_schema, tgt_table
+                    )
+                    if not exists:
+                        raise RuntimeError(
+                            f"""Failed to automatically create tgt {tgt_schema}.{tgt_table}
+Probably an error occurred that could not be processed.
+Please create table manually"""
+                        )
+
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+                self.log.info(
+                    f"""Checking equal structure between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
+                )
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
+                    src_schema,
+                    src_table,
+                    tgt_schema,
+                    tgt_table,
+                    union_columns,
+                )
+                if not equal_schema:
+                    self.log.warning(error)
+                    self.log.info(
+                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                    )
+                    exists = self.ch_man.ch_check_table_exist(
+                        tgt_cursor, tgt_schema, tgt_table
+                    )
+                    if exists:
+                        self.log.warning(
+                            f"""Table already exists {tgt_schema}.{tgt_table}
+    Trying to backup the table"""
+                        )
+
+                        self.backup_tgt_table(
+                            tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
+                        )
+
+                        self.log.info(
+                            f"""Table backup completed successfully
+creating a new table {tgt_schema}.{tgt_table}"""
+                        )
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+                    self.log.info(
+                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                    )
+
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+            case PostgresToClickhouseSchemaStrategy.backup_and_create_table_if_exist:
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                if self.ch_man.ch_check_table_exist(tgt_cursor, tgt_schema, tgt_table):
+                    self.log.warning(
+                        f"""Table already exists {tgt_schema}.{tgt_table}
+Trying to backup the table"""
+                    )
+
+                    self.backup_tgt_table(
+                        tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
+                    )
+
+                    self.log.warning(
+                        f"""Table backup completed successfully
+creating a new table {tgt_schema}.{tgt_table}"""
+                    )
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+                    self.log.info(
+                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                    )
+
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+            case (
+                PostgresToClickhouseSchemaStrategy.drop_and_create_table_if_schema_changed
+            ):
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                exists = self.ch_man.ch_check_table_exist(
+                    tgt_cursor, tgt_schema, tgt_table
+                )
+                if not exists:
+                    self.log.warning(
+                        f"""Table is missing {tgt_schema}.{tgt_table}
+I'm trying to create a table"""
+                    )
+
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+                    self.log.info(
+                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                    )
+
+                    self.log.info(
+                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                    )
+                    exists = self.ch_man.ch_check_table_exist(
+                        tgt_cursor, tgt_schema, tgt_table
+                    )
+                    if not exists:
+                        raise RuntimeError(
+                            f"""Failed to automatically create tgt {tgt_schema}.{tgt_table}
+Probably an error occurred that could not be processed.
+Please create table manually"""
+                        )
+
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+                self.log.info(
+                    f"""Checking equal schema between {src_schema}.{src_table} and {tgt_schema}.{tgt_table}"""
+                )
+                equal_schema, error = self.schema_checker.check_equal_columns_text(
+                    src_schema,
+                    src_table,
+                    tgt_schema,
+                    tgt_table,
+                    union_columns,
+                )
+                if not equal_schema:
+                    self.log.warning(error)
+                    self.log.info(
+                        f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                    )
+                    exists = self.ch_man.ch_check_table_exist(
+                        tgt_cursor, tgt_schema, tgt_table
+                    )
+                    if exists:
+                        self.log.warning(
+                            f"""The table has been dropped: {tgt_schema}.{tgt_table}
+Trying to drop the table"""
+                        )
+
+                        self.drop_tgt_table(
+                            tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
+                        )
+
+                        self.log.info(
+                            f"""Table droping success: {tgt_schema}.{tgt_table}
+I'm trying to create a table"""
+                        )
+                    self.create_tgt_table(
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        ch_cluster,
+                        ch_order_by,
+                        union_columns,
+                        create_table_template,
+                    )
+
+                    self.log.info(
+                        f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                    )
+
+                    union_columns = self.schema_checker.make_fields_info(
+                        src_table_check,
+                        src_cursor,
+                        src_schema,
+                        src_table,
+                        tgt_cursor,
+                        tgt_schema,
+                        tgt_table,
+                        rule_columns,
+                    )
+
+            case PostgresToClickhouseSchemaStrategy.drop_and_create_table_if_exist:
+                self.log.info(
+                    f"""Checking the existence of the table: {tgt_schema}.{tgt_table}"""
+                )
+                if self.ch_man.ch_check_table_exist(tgt_cursor, tgt_schema, tgt_table):
+                    self.log.warning(
+                        f"""Table already exists {tgt_schema}.{tgt_table}
+Trying to drop the table"""
+                    )
+
+                    self.drop_tgt_table(
+                        tgt_cursor, tgt_schema, tgt_table, ch_cluster, union_columns
+                    )
+
+                    self.log.info(
+                        f"""Table droping success: {tgt_schema}.{tgt_table}
+I'm trying to create a table"""
+                    )
+                else:
+                    self.log.info(
+                        f"""The table is missing: {tgt_schema}.{tgt_table}
+trying to create it"""
+                    )
+
+                self.create_tgt_table(
+                    tgt_cursor,
+                    tgt_schema,
+                    tgt_table,
+                    ch_cluster,
+                    ch_order_by,
+                    union_columns,
+                    create_table_template,
+                )
+
+                self.log.info(
+                    f"""Table created successfully: {tgt_schema}.{tgt_table}"""
+                )
+
+                union_columns = self.schema_checker.make_fields_info(
+                    src_table_check,
+                    src_cursor,
+                    src_schema,
+                    src_table,
+                    tgt_cursor,
+                    tgt_schema,
+                    tgt_table,
+                    rule_columns,
+                )
+
+            case PostgresToClickhouseSchemaStrategy.do_nothing:
+                self.log.info(
+                    f"""Strategy do_nothing selected
+I do not perform any operations on the table schema {tgt_schema}.{tgt_table}"""
+                )
+
+            case x:
+                raise RuntimeError(
+                    f"""Strategy {x} does not have a handler
+Please check the correctness of the parameter 'schema_strategy'"""
+                )
+
+    def create_tgt_table(
+        self,
+        cursor,
+        database,
+        table,
+        ch_cluster,
+        ch_order_by,
+        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
+        create_table_template,
+    ):
+        self.log.info(f"Creating a tgt table in clickhouse {database}.{table} ...")
+
+        # проверяем наличие базы и создаём её если отсутствует
+        self.log.info(
+            f"""Checking for database existence in clickhouse: "{database}" ..."""
+        )
+        if not self.ch_man.ch_check_database_exists(cursor, database):
+            self.log.warning(f"Database is missing: {database}")
+            self.ch_man.ch_create_database(
+                cursor,
+                database,
+                if_not_exists=False,
+                cluster=ch_cluster,
+                engine=None,
+                comment=None,
+            )
+        else:
+            self.log.info(f"The database exists: {database}")
+
+        # формируем список столбцов для выражения create table
+        # нужно отсортировать колонки строго так, как они сделаны в postgres (что бы красиво было ^:)
+        # для этого я использую ordinal_position
+        sorted_fields = sorted(union_columns)
+
+        self.log.info("rules for creating table columns:")
+        for x in sorted_fields.copy():
+            self.log.info(f"{x}")
+
+        # делаю список столбцов, который будет частью выражения create table (create_fields)
+        create_fields = map(
+            lambda x: x.create_tgt_fields_stmp(cursor), sorted_fields.copy()
+        )
+        create_fields = [x for x in create_fields if x is not None]
+
+        # отправляем запрос на создание таблицы
+        self.ch_man.ch_create_table(
+            cursor,
+            database,
+            table,
+            columns=create_fields,
+            order_by=ch_order_by,
+            cluster=ch_cluster,
+            create_table_template=create_table_template,
+        )
+
+        self.log.info(f"Table create success")
+
+    def drop_tgt_table(
+        self,
+        ch_cursor,
+        ch_database,
+        ch_table,
+        ch_cluster,
+        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
+    ):
+        self.ch_man.ch_drop_table(
+            ch_cursor,
+            ch_database,
+            ch_table,
+            cluster=ch_cluster,
+            temporary=None,
+            sync=None,
+        )
+
+    def backup_tgt_table(
+        self,
+        ch_cursor,
+        ch_database,
+        ch_table,
+        ch_cluster,
+        union_columns: List[PostgresToClickhouseSchemaSyncCompareColumn],
+    ):
+        self.ch_man.ch_backup_table(
+            ch_cursor,
+            ch_database,
+            ch_table,
+            cluster=ch_cluster,
+        )
 
 
 class PostgresToClickhouseSchemaSyncOperator(BaseOperator):
@@ -1637,6 +1816,167 @@ engine ReplicatedMergeTree
                 override_schema,
                 exclude_columns,
                 create_table_template,
+            ),
+            pipe_stage,
+        )
+
+        return builder
+
+    return wrapper
+
+class PostgresToClickhouseSchemaCheckModule(PipeTask):
+    def __init__(
+        self,
+        context_key: str,
+        template_render: Callable,
+        src_cur_key: Optional[str],
+        src_schema: Optional[str],
+        src_table: Optional[str],
+        tgt_cur_key: Optional[str],
+        tgt_schema: str,
+        tgt_table: str,
+        save_to: str,
+        save_if: Callable[[Any, List], bool] | bool | str,
+        src_table_check: bool,
+        ch_cluster: Optional[str] = "gpn",
+        ch_order_by: Optional[str] = None,
+        rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+        override_schema: Optional[Union[str, Dict[str, str]]] = None,
+        exclude_columns: Optional[Union[str, List[str]]] = None,
+    ):
+        super().__init__(context_key)
+        super().set_template_fields(
+            (
+                "src_cur_key",
+                "src_schema",
+                "src_table",
+                "tgt_cur_key",
+                "tgt_schema",
+                "tgt_table",
+                "save_to",
+                "src_table_check",
+                "ch_order_by",
+                "ch_cluster",
+                "rename_columns",
+                "override_schema",
+                "exclude_columns",
+            )
+        )
+        super().set_template_render(template_render)
+
+        if src_cur_key:
+            self.src_cur_key = src_cur_key
+        else:
+            self.src_cur_key = "pg_cur"
+
+        if tgt_cur_key:
+            self.tgt_cur_key = tgt_cur_key
+        else:
+            self.tgt_cur_key = "ch_cur"
+
+        self.src_schema = src_schema
+        self.src_table = src_table
+        self.tgt_schema = tgt_schema
+        self.tgt_table = tgt_table
+        self.save_to = save_to
+        self.save_if = save_if
+        self.src_table_check = src_table_check
+        self.ch_cluster = ch_cluster
+        self.ch_order_by = ch_order_by
+        self.rename_columns = rename_columns
+        self.override_schema = override_schema
+        self.exclude_columns = exclude_columns
+
+    def __call__(self, context):
+        self.render_template_fields(context)
+
+        match context[self.context_key].get(self.src_cur_key):
+            case None:
+                raise RuntimeError(
+                    """Could not find postgres cursor (postgres connection)
+Before using module, you need to define postgres connection.
+This can be done via 'pg_auth_airflow_conn'"""
+                )
+            case cur:
+                src_cursor: psycopg2.extensions.cursor = cur
+
+        match context[self.context_key].get(self.tgt_cur_key):
+            case None:
+                raise RuntimeError(
+                    """Could not find postgres cursor (postgres connection)
+Before using module, you need to define postgres connection.
+This can be done via 'pg_auth_airflow_conn'"""
+                )
+            case cur:
+                tgt_cursor: ClickhouseCursor = cur
+
+        log = logging.getLogger(self.__class__.__name__)
+
+        base_module = PostgresToClickhouseSchemaCheck(
+            logger=log,
+            src_cursor=src_cursor,
+            src_schema=self.src_schema,
+            src_table=self.src_table,
+            tgt_cursor=tgt_cursor,
+            tgt_schema=self.tgt_schema,
+            tgt_table=self.tgt_table,
+            src_table_check=self.src_table_check,
+            rename_columns=self.rename_columns,
+            override_schema=self.override_schema,
+            exclude_columns=self.exclude_columns,
+        )
+
+        diff = base_module.execute(context)
+
+        if self.save_if_eval(context, diff):
+            context[self.save_to] = diff
+
+
+    def save_if_eval(self, context, res: List):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
+
+
+
+def pg_to_ch_schema_check(
+    src_schema: Optional[str],
+    src_table: Optional[str],
+    tgt_schema: str,
+    tgt_table: str,
+    save_to: str,
+    save_if: Callable[[Any, List], bool] | bool | str = True,
+    src_table_check: bool = True,
+    rename_columns: Optional[Union[str, Dict[str, str]]] = None,
+    override_schema: Optional[Union[str, Dict[str, str]]] = None,
+    exclude_columns: Optional[Union[str, List[str]]] = None,
+    src_cur_key: Optional[str] = None,
+    tgt_cur_key: Optional[str] = None,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresToClickhouseSchemaCheckModule(
+                context_key=builder.context_key,
+                template_render=builder.template_render,
+                src_cur_key=src_cur_key,
+                src_schema=src_schema,
+                src_table=src_table,
+                tgt_cur_key=tgt_cur_key,
+                tgt_schema=tgt_schema,
+                tgt_table=tgt_table,
+                src_table_check=src_table_check,
+                save_to=save_to,
+                save_if=save_if,
+                rename_columns=rename_columns,
+                override_schema=override_schema,
+                exclude_columns=exclude_columns,
             ),
             pipe_stage,
         )

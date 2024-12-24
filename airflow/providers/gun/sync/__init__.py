@@ -6,6 +6,7 @@ from airflow.providers.gun.sync.pg_to_pg_schema_sync import (
 )
 from airflow.providers.gun.sync.pg_to_ch_schema_sync import (
     pg_to_ch_schema_sync,
+    pg_to_ch_schema_check,
     PostgresToClickhouseSchemaSyncOperator,
     PostgresToClickhouseSchemaStrategy,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "pg_to_pg_schema_sync",
     "pg_to_pg_schema_check",
     "pg_to_ch_schema_sync",
+    "pg_to_ch_schema_check",
     "pg_full_reload",
     "pg_to_pg_full_reload",
     "pg_to_ch_full_reload",

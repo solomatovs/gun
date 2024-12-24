@@ -334,15 +334,15 @@ class PostgresToPostgresSchemaCheck:
         )
 
         return self.schema_check(
-            src_cursor,
-            src_schema,
-            src_table,
-            tgt_cursor,
-            tgt_schema,
-            tgt_table,
-            src_table_check,
-            rule_columns,
-            context,
+            src_cursor=src_cursor,
+            src_schema=src_schema,
+            src_table=src_table,
+            tgt_cursor=tgt_cursor,
+            tgt_schema=tgt_schema,
+            tgt_table=tgt_table,
+            src_table_check=src_table_check,
+            rule_columns=rule_columns,
+            context=context,
         )
 
     def clean_validate_and_flatten_params(
