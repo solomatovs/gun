@@ -1,7 +1,7 @@
 
 Package ``apache-airflow-providers-gun``
 
-Release: ``0.3.2``
+Release: ``0.7.0``
 
 `(⊙.⊙(☉̃ₒ☉)⊙.⊙) <https://alm-itsk.gazprom-neft.local:8080/TFS/GPN/dmpdwh/_git/airflow_providers?path=/gun/README.md>`__
 

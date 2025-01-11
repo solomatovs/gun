@@ -12,6 +12,7 @@ from airflow.utils.xcom import XCOM_RETURN_KEY
 
 __all__ = [
     "cx_save",
+    "cx_save_to_result",
     "cx_save_from_xcom",
     "cx_save_to_xcom",
     "cx_print",
@@ -63,7 +64,6 @@ class ContextSaveModule(PipeTask):
 
         return save_if
 
-
 def cx_save(
     save_to: str,
     save_object: Any,
@@ -98,6 +98,93 @@ def cx_save(
                 builder.context_key,
                 builder.template_render,
                 save_to=save_to,
+                save_object=save_object,
+                save_if=save_if,
+                jinja_render=jinja_render,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+class ContextSaveToResultModule(PipeTask):
+    def __init__(
+        self,
+        context_key: str,
+        template_render: Callable,
+        save_object: Any,
+        save_if: Callable[[Any, Any], bool] | bool | str,
+        jinja_render: bool,
+    ):
+        super().__init__(context_key)
+        super().set_template_fields(["save_to"])
+        super().set_template_render(template_render)
+
+        self.ti_key = "ti"
+        self.save_to = self.task_result_key
+        self.save_object = save_object
+        self.save_if = save_if
+        self.jinja_render = jinja_render
+
+    def __call__(self, context):
+        self.render_template_fields(context)
+
+        if self.jinja_render:
+            res = self.template_render(self.save_object, context)
+        else:
+            res = self.save_object
+
+        if self.save_if_eval(context, res):
+            context[self.save_to] = res
+
+    def save_if_eval(self, context, res):
+        match self.save_if:
+            case bool():
+                save_if = self.save_if
+            case str():
+                save_if = self.template_render(self.save_if, context)
+            case _:
+                save_if = self.save_if(context, res)
+
+        return save_if
+
+
+def cx_save_to_result(
+    save_object: Any,
+    save_if: Callable[[Any, Any], bool] | bool | str = True,
+    jinja_render: bool = True,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в результат таска
+    Airflow передаёёт результат выполнения тасков в xcom
+    Соответственно это можно использовать далее в других тасках
+
+    Args:
+        save_object: это объект, который будет сохранён в Airflow Context, например это может быть jinja шаблон или словарь
+        jinja_render: если True, то объект будет предварительно обработан через jinja
+
+    Examples:
+        здесь функция my_task не возвращает результат (результат выполнения my_task это None)
+        однако cx_save_to_result переопределить этот результат и заполнит его значением указанного словаря
+        >>> @task()
+            @cx_save_to_result({
+                'target_row': "{{ params.target_row }}",
+                'name': res,
+                'error_row': 0,
+            })
+            @pipe(pipe_stage=PipeStage.After)
+             def my_task():
+                pass
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ContextSaveToResultModule(
+                builder.context_key,
+                builder.template_render,
                 save_object=save_object,
                 save_if=save_if,
                 jinja_render=jinja_render,

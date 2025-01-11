@@ -40,6 +40,9 @@ __all__ = [
     "ch_execute_and_save_to_xcom",
     "ch_execute_and_fetchone_to_xcom",
     "ch_execute_and_fetchall_to_xcom",
+    "ch_execute_and_save_to_result",
+    "ch_execute_and_fetchone_to_result",
+    "ch_execute_and_fetchall_to_result",
     "ch_send_query",
     "ch_send_queries",
     "ch_send_file_query",
@@ -50,8 +53,11 @@ __all__ = [
     "ch_save_to_gzip_csv",
     "ch_save_to_xcom",
     "ch_save_to_context",
+    "ch_save_to_result",
     "ch_fetchone_to_context",
     "ch_fetchall_to_context",
+    "ch_fetchone_to_result",
+    "ch_fetchall_to_result",
     "ch_fetchone_to_xcom",
     "ch_fetchall_to_xcom",
     "ch_check_table_exist",
@@ -1298,6 +1304,48 @@ def ch_save_to_context(
     return wrapper
 
 
+def ch_save_to_result(
+    save_builder: Callable[[ClickhouseCursor], Any],
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key=ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        save_if: это функция, которая будет использована для проверки, нужно ли сохранять результат в context
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_save_to_result(lambda cur: {
+                'target_row': cur.rowcount,
+                'source_row': {{ params.source_row }},
+                'error_row': 0,
+            })
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
 class ClickhouseExecuteModule(PipeTask):
     """
     Отправляет sql запрос в clickhouse
@@ -2018,6 +2066,76 @@ def ch_fetchall_to_context(
     return wrapper
 
 
+def ch_fetchone_to_result(
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_fetchone_to_result()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def ch_fetchall_to_result(
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_fetchall_to_result()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
 def ch_fetchone_to_xcom(
     save_to: str = XCOM_RETURN_KEY,
     save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
@@ -2294,6 +2412,216 @@ def ch_execute_and_fetchall_to_context(
                 builder.context_key,
                 builder.template_render,
                 save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+def ch_execute_and_save_to_result(
+    sql: str,
+    save_builder: Callable[[ClickhouseCursor], Any],
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_save_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id,
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def ch_execute_and_fetchone_to_result(
+    sql: str,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_fetchone_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id,
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def ch_execute_and_fetchall_to_result(
+    sql: str,
+    execute_if: Callable[[Any, ClickhouseCursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, ClickhouseCursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    external_tables: Optional[Dict] = None,
+    query_id: Optional[str] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    types_check=False,
+    jinja_render: bool = True,
+    cur_key: str = ch_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат в Airflow Context для последующего использования
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул clickhouse:
+        >>> @ch_execute_and_fetchall_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            ClickhouseExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                external_tables=external_tables,
+                query_id=query_id,
+                settings=settings or {},
+                types_check=types_check,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            ClickhouseSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
                 save_builder=lambda cur: cur.fetchall(),
                 save_if=save_if,
                 jinja_render=jinja_render,

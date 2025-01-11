@@ -14,7 +14,6 @@ from typing import (
     Union,
     Dict,
 )
-from enum import Enum
 from pathlib import Path
 from contextlib import closing, ExitStack
 
@@ -38,6 +37,9 @@ __all__ = [
     "pg_execute_and_save_to_xcom",
     "pg_execute_and_fetchone_to_xcom",
     "pg_execute_and_fetchall_to_xcom",
+    "pg_execute_and_save_to_result",
+    "pg_execute_and_fetchone_to_result",
+    "pg_execute_and_fetchall_to_result",
     "pg_execute_file",
     "pg_execute_file_and_commit",
     "pg_fetch_to_stdout",
@@ -70,6 +72,9 @@ __all__ = [
     "pg_save_to_xcom",
     "pg_fetchone_to_xcom",
     "pg_fetchall_to_xcom",
+    "pg_save_to_result",
+    "pg_fetchone_to_result",
+    "pg_fetchall_to_result",
     "pg_check_table_exist",
     "pg_check_column_exist",
 ]
@@ -2639,6 +2644,118 @@ def pg_fetchall_to_context(
     return wrapper
 
 
+def pg_save_to_result(
+    save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        save_if: это функция, которая будет использована для проверки, нужно ли сохранять результат в context
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_save_to_result(lambda cur: {
+                'target_row': cur.rowcount,
+                'source_row': {{ params.source_row }},
+                'error_row': 0,
+            })
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def pg_fetchone_to_result(
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_fetchone_to_result()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def pg_fetchall_to_result(
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет сохранить любую информацию в Airflow Context для последующего использования
+    Args:
+        save_to: это имя context ключа.
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_fetchall_to_result()
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
 def pg_execute_and_save_to_context(
     sql: str,
     save_to: str,
@@ -2817,6 +2934,190 @@ def pg_execute_and_fetchall_to_context(
                 builder.context_key,
                 builder.template_render,
                 save_to=save_to,
+                save_builder=lambda cur: cur.fetchall(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def pg_execute_and_save_to_result(
+    sql: str,
+    save_builder: Callable[[psycopg2.extensions.cursor], Any],
+    execute_if: Callable[[Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат запроса как результат декорируемой функции (передается в return_key xcom)
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        save_builder: это функция, которая будет использована для генерации значения, которое будет добавлено в context
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_execute_and_save_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=save_builder,
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def pg_execute_and_fetchone_to_result(
+    sql: str,
+    execute_if: Callable[[Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат fetchone как результат декорируемой функции (передается в return_key xcom)
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        execute_if: это функция, которая будет использована для проверки необходимости выполнения запроса
+        save_if: это функция, которая будет использована для проверки необходимости сохранения данных
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_execute_and_fetchone_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_to="my_context_key",
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
+                save_builder=lambda cur: cur.fetchone(),
+                save_if=save_if,
+                jinja_render=jinja_render,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+        return builder
+
+    return wrapper
+
+
+def pg_execute_and_fetchall_to_result(
+    sql: str,
+    execute_if: Callable[[Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    save_if: Callable[[Any, Any, psycopg2.extensions.cursor], bool] | bool | str = True,
+    params: Optional[Any] = None,
+    jinja_render: bool = True,
+    cur_key: str = pg_cur_key_default,
+    pipe_stage: Optional[PipeStage] = None,
+):
+    """
+    Модуль позволяет выполнить sql запрос и сохранить результат fetchall как результат декорируемой функции (передается в return_key xcom)
+
+    Args:
+        sql: это sql запрос, который будет выполнен
+        execute_if: это функция, которая будет использована для проверки необходимости выполнения запроса
+        save_if: это функция, которая будет использована для проверки необходимости сохранения данных
+        params: это параметры, которые будут переданы в sql запрос (если запрос содержит параметры, см примеры ниже)
+        jinja_render: если True, то значение будет передано в шаблонизатор jinja2
+
+    Examples:
+        Например можно сохранить кол-во строк, которые вернул postgres:
+        >>> @pg_execute_and_fetchall_to_result(
+                sql="select %(date)s", params={"date": pendulum.now().date()},
+                save_builder=lambda cur: {
+                    'target_row': cur.rowcount,
+                    'source_row': {{ params.source_row }},
+                    'error_row': 0,
+                },
+            )
+    """
+
+    def wrapper(builder: PipeTaskBuilder):
+        builder.add_module(
+            PostgresExecuteModule(
+                builder.context_key,
+                builder.template_render,
+                sql,
+                params,
+                execute_if=execute_if,
+                cur_key=cur_key,
+            ),
+            pipe_stage,
+        )
+
+        builder.add_module(
+            PostgresSaveToContextModule(
+                builder.context_key,
+                builder.template_render,
+                save_to=builder.task_result_key,
                 save_builder=lambda cur: cur.fetchall(),
                 save_if=save_if,
                 jinja_render=jinja_render,
